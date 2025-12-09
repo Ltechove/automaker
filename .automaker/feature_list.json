@@ -7,13 +7,6 @@
     "status": "verified"
   },
   {
-    "id": "feature-1765261027396-b78maajg7",
-    "category": "Kanban",
-    "description": "When the agent is marked as verified, remove their context file",
-    "steps": [],
-    "status": "backlog"
-  },
-  {
     "id": "feature-1765262225700-q2rkue6l8",
     "category": "Context",
     "description": "Add Context File should show a file name and a textarea for the context info, that text area should allow drag n drop for txt files and .md files which the system will parse and put into the text area",
@@ -68,5 +61,40 @@
     "description": "Add shortcuts keys to all left navigation links, then add shortcuts to the add buttons on the routes (such as kanbam add feature). mske sure they don't mess with normal input or textarea typing or typeaheads. display the shortkey in link or button for users to know (K)",
     "steps": [],
     "status": "verified"
+  },
+  {
+    "id": "feature-1765264941688-omfcpy7no",
+    "category": "Kanban",
+    "description": "For the first 10 in progress cards, add shortcut keys 1 through 0 on the keyboard for opening their output modal",
+    "steps": [],
+    "status": "backlog"
+  },
+  {
+    "id": "feature-1765265001317-4eyqyif9z",
+    "category": "Kanban",
+    "description": "Add a delete all button in the verified column header which runs through all verified cards and deletes them with the exact same delete actions. remember to show a confirm delete confirmation dialog before actually deleting.",
+    "steps": [],
+    "status": "backlog"
+  },
+  {
+    "id": "feature-1765265036114-9oong1mrv",
+    "category": "Kanban",
+    "description": "Remove the refresh button from the headers, we should need to ever manually refresh anything if our app is well designed",
+    "steps": [],
+    "status": "backlog"
+  },
+  {
+    "id": "feature-1765265099914-71eq4x4yl",
+    "category": "Core",
+    "description": "Add a ` shortcut to toggle the left side panel (on hover of the toggle show a tool tip with the shortcut info)",
+    "steps": [],
+    "status": "backlog"
+  },
+  {
+    "id": "feature-1765265179876-5zcrlncdf",
+    "category": "Kanban",
+    "description": "Add a button in the backlog header which will just take the top cards and put them into the in progress board (up to the limit of the concurrency of course) so that a user doesn't have to drag each on individually, figure out the best name for it. give it a shortcut as well",
+    "steps": [],
+    "status": "backlog"
   }
 ]

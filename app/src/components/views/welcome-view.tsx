@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/card";
 import { useAppStore } from "@/store/app-store";
 import { getElectronAPI } from "@/lib/electron";
+import { initializeProject } from "@/lib/project-init";
 import {
   FolderOpen,
   Plus,
@@ -30,6 +31,7 @@ import {
   Sparkles,
   MessageSquare,
   ChevronDown,
+  Loader2,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -37,6 +39,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { toast } from "sonner";
 
 export function WelcomeView() {
   const { projects, addProject, setCurrentProject, setCurrentView } =
@@ -45,14 +48,30 @@ export function WelcomeView() {
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectPath, setNewProjectPath] = useState("");
   const [isCreating, setIsCreating] = useState(false);
+  const [isOpening, setIsOpening] = useState(false);
+  const [showInitDialog, setShowInitDialog] = useState(false);
+  const [initStatus, setInitStatus] = useState<{
+    isNewProject: boolean;
+    createdFiles: string[];
+    projectName: string;
+    projectPath: string;
+  } | null>(null);
 
-  const handleOpenProject = useCallback(async () => {
-    const api = getElectronAPI();
-    const result = await api.openDirectory();
+  /**
+   * Initialize project and optionally kick off project analysis agent
+   */
+  const initializeAndOpenProject = useCallback(async (path: string, name: string) => {
+    setIsOpening(true);
+    try {
+      // Initialize the .automaker directory structure
+      const initResult = await initializeProject(path);
 
-    if (!result.canceled && result.filePaths[0]) {
-      const path = result.filePaths[0];
-      const name = path.split("/").pop() || "Untitled Project";
+      if (!initResult.success) {
+        toast.error("Failed to initialize project", {
+          description: initResult.error || "Unknown error occurred",
+        });
+        return;
+      }
 
       const project = {
         id: `project-${Date.now()}`,
@@ -63,8 +82,52 @@ export function WelcomeView() {
 
       addProject(project);
       setCurrentProject(project);
+
+      // Show initialization dialog if files were created
+      if (initResult.createdFiles && initResult.createdFiles.length > 0) {
+        setInitStatus({
+          isNewProject: initResult.isNewProject,
+          createdFiles: initResult.createdFiles,
+          projectName: name,
+          projectPath: path,
+        });
+        setShowInitDialog(true);
+
+        // TODO: Kick off agent to analyze the project and update app_spec.txt
+        // This will be implemented in a future iteration with the auto-mode service
+        console.log("[Welcome] Project initialized, created files:", initResult.createdFiles);
+      } else {
+        toast.success("Project opened", {
+          description: `Opened ${name}`,
+        });
+      }
+    } catch (error) {
+      console.error("[Welcome] Failed to open project:", error);
+      toast.error("Failed to open project", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsOpening(false);
     }
   }, [addProject, setCurrentProject]);
+
+  const handleOpenProject = useCallback(async () => {
+    const api = getElectronAPI();
+    const result = await api.openDirectory();
+
+    if (!result.canceled && result.filePaths[0]) {
+      const path = result.filePaths[0];
+      const name = path.split("/").pop() || "Untitled Project";
+      await initializeAndOpenProject(path, name);
+    }
+  }, [initializeAndOpenProject]);
+
+  /**
+   * Handle clicking on a recent project
+   */
+  const handleRecentProjectClick = useCallback(async (project: { id: string; name: string; path: string }) => {
+    await initializeAndOpenProject(project.path, project.name);
+  }, [initializeAndOpenProject]);
 
   const handleNewProject = () => {
     setNewProjectName("");
@@ -96,44 +159,39 @@ export function WelcomeView() {
       // Create project directory
       await api.mkdir(projectPath);
 
-      // Create initial files
+      // Initialize .automaker directory with all necessary files
+      const initResult = await initializeProject(projectPath);
+
+      if (!initResult.success) {
+        toast.error("Failed to initialize project", {
+          description: initResult.error || "Unknown error occurred",
+        });
+        return;
+      }
+
+      // Update the app_spec.txt with the project name
       await api.writeFile(
-        `${projectPath}/app_spec.txt`,
+        `${projectPath}/.automaker/app_spec.txt`,
         `<project_specification>
   <project_name>${newProjectName}</project_name>
 
   <overview>
-    Describe your project here...
+    Describe your project here. This file will be analyzed by an AI agent
+    to understand your project structure and tech stack.
   </overview>
 
   <technology_stack>
-    <!-- Define your tech stack -->
+    <!-- The AI agent will fill this in after analyzing your project -->
   </technology_stack>
 
   <core_capabilities>
-    <!-- List core features -->
+    <!-- List core features and capabilities -->
   </core_capabilities>
-</project_specification>`
-      );
 
-      await api.writeFile(
-        `${projectPath}/.automaker/feature_list.json`,
-        JSON.stringify(
-          [
-            {
-              category: "Core",
-              description: "First feature to implement",
-              steps: [
-                "Step 1: Define requirements",
-                "Step 2: Implement",
-                "Step 3: Test",
-              ],
-              passes: false,
-            },
-          ],
-          null,
-          2
-        )
+  <implemented_features>
+    <!-- The AI agent will populate this based on code analysis -->
+  </implemented_features>
+</project_specification>`
       );
 
       const project = {
@@ -146,8 +204,24 @@ export function WelcomeView() {
       addProject(project);
       setCurrentProject(project);
       setShowNewProjectDialog(false);
+
+      toast.success("Project created", {
+        description: `Created ${newProjectName} with .automaker directory`,
+      });
+
+      // Set init status to show the dialog
+      setInitStatus({
+        isNewProject: true,
+        createdFiles: initResult.createdFiles || [],
+        projectName: newProjectName,
+        projectPath: projectPath,
+      });
+      setShowInitDialog(true);
     } catch (error) {
       console.error("Failed to create project:", error);
+      toast.error("Failed to create project", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
     } finally {
       setIsCreating(false);
     }
@@ -284,7 +358,7 @@ export function WelcomeView() {
                   <div
                     key={project.id}
                     className="group relative overflow-hidden rounded-xl border border-white/10 bg-zinc-900/50 backdrop-blur-md hover:bg-zinc-900/70 hover:border-brand-500/50 transition-all duration-200 cursor-pointer"
-                    onClick={() => setCurrentProject(project)}
+                    onClick={() => handleRecentProjectClick(project)}
                     data-testid={`recent-project-${project.id}`}
                   >
                     <div className="absolute inset-0 bg-gradient-to-br from-brand-500/0 to-purple-600/0 group-hover:from-brand-500/5 group-hover:to-purple-600/5 transition-all"></div>
@@ -405,6 +479,79 @@ export function WelcomeView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Project Initialization Dialog */}
+      <Dialog open={showInitDialog} onOpenChange={setShowInitDialog}>
+        <DialogContent
+          className="bg-zinc-900 border-white/10"
+          data-testid="project-init-dialog"
+        >
+          <DialogHeader>
+            <DialogTitle className="text-white flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-brand-500" />
+              {initStatus?.isNewProject ? "Project Initialized" : "Project Updated"}
+            </DialogTitle>
+            <DialogDescription className="text-zinc-400">
+              {initStatus?.isNewProject
+                ? `Created .automaker directory structure for ${initStatus?.projectName}`
+                : `Updated missing files in .automaker for ${initStatus?.projectName}`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <div className="space-y-2">
+              <p className="text-sm text-zinc-300 font-medium">Created files:</p>
+              <ul className="space-y-1.5">
+                {initStatus?.createdFiles.map((file) => (
+                  <li
+                    key={file}
+                    className="flex items-center gap-2 text-sm text-zinc-400"
+                  >
+                    <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                    <code className="text-xs bg-zinc-800 px-2 py-0.5 rounded">
+                      {file}
+                    </code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {initStatus?.isNewProject && (
+              <div className="mt-4 p-3 rounded-lg bg-zinc-800/50 border border-white/5">
+                <p className="text-sm text-zinc-400">
+                  <span className="text-brand-400">Tip:</span> Edit the{" "}
+                  <code className="text-xs bg-zinc-800 px-1.5 py-0.5 rounded">
+                    app_spec.txt
+                  </code>{" "}
+                  file to describe your project. The AI agent will use this to
+                  understand your project structure.
+                </p>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => setShowInitDialog(false)}
+              className="bg-gradient-to-r from-brand-500 to-purple-600 hover:from-brand-600 hover:to-purple-700 text-white border-0"
+              data-testid="close-init-dialog"
+            >
+              Get Started
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Loading overlay when opening project */}
+      {isOpening && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          data-testid="project-opening-overlay"
+        >
+          <div className="flex flex-col items-center gap-3 p-6 rounded-xl bg-zinc-900 border border-white/10">
+            <Loader2 className="w-8 h-8 text-brand-500 animate-spin" />
+            <p className="text-white font-medium">Initializing project...</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

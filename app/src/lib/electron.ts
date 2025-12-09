@@ -281,9 +281,18 @@ export const getElectronAPI = (): ElectronAPI => {
     },
 
     exists: async (filePath: string) => {
-      return mockFileSystem[filePath] !== undefined ||
-        filePath.endsWith("feature_list.json") ||
-        filePath.endsWith("app_spec.txt");
+      // Check if file exists in mock file system (including newly created files)
+      if (mockFileSystem[filePath] !== undefined) {
+        return true;
+      }
+      // Legacy mock files for backwards compatibility
+      if (filePath.endsWith("feature_list.json") && !filePath.includes(".automaker")) {
+        return true;
+      }
+      if (filePath.endsWith("app_spec.txt") && !filePath.includes(".automaker")) {
+        return true;
+      }
+      return false;
     },
 
     stat: async () => {

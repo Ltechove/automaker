@@ -58,7 +58,7 @@ export function AgentOutputModal({
         projectPathRef.current = currentProject.path;
 
         // Ensure context directory exists
-        const contextDir = `${currentProject.path}/.automaker/context`;
+        const contextDir = `${currentProject.path}/.automaker/agents-context`;
         await api.mkdir(contextDir);
 
         // Try to read existing output file
@@ -89,7 +89,7 @@ export function AgentOutputModal({
     if (!api) return;
 
     try {
-      const contextDir = `${projectPathRef.current}/.automaker/context`;
+      const contextDir = `${projectPathRef.current}/.automaker/agents-context`;
       const outputPath = `${contextDir}/${featureId}.md`;
 
       await api.writeFile(outputPath, newContent);
@@ -120,9 +120,16 @@ export function AgentOutputModal({
         const toolInput = event.input
           ? JSON.stringify(event.input, null, 2)
           : "";
-        newContent = `\n🔧 Tool: ${toolName}\n${toolInput ? `Input: ${toolInput}` : ""}`;
+        newContent = `\n🔧 Tool: ${toolName}\n${
+          toolInput ? `Input: ${toolInput}` : ""
+        }`;
       } else if (event.type === "auto_mode_phase") {
-        const phaseEmoji = event.phase === "planning" ? "📋" : event.phase === "action" ? "⚡" : "✅";
+        const phaseEmoji =
+          event.phase === "planning"
+            ? "📋"
+            : event.phase === "action"
+            ? "⚡"
+            : "✅";
         newContent = `\n${phaseEmoji} ${event.message}\n`;
       } else if (event.type === "auto_mode_error") {
         newContent = `\n❌ Error: ${event.error}\n`;
@@ -164,7 +171,10 @@ export function AgentOutputModal({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col" data-testid="agent-output-modal">
+      <DialogContent
+        className="max-w-4xl max-h-[80vh] flex flex-col"
+        data-testid="agent-output-modal"
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Loader2 className="w-5 h-5 text-purple-500 animate-spin" />

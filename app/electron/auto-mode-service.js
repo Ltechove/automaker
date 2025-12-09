@@ -324,7 +324,7 @@ class AutoModeService {
    */
   async readContextFile(projectPath, featureId) {
     try {
-      const contextPath = path.join(projectPath, ".automaker", "context", `${featureId}.md`);
+      const contextPath = path.join(projectPath, ".automaker", "agents-context", `${featureId}.md`);
       const content = await fs.readFile(contextPath, "utf-8");
       return content;
     } catch (error) {
@@ -632,7 +632,7 @@ Begin by assessing what's been done and what remains to be completed.`;
     if (!projectPath) return;
 
     try {
-      const contextDir = path.join(projectPath, ".automaker", "context");
+      const contextDir = path.join(projectPath, ".automaker", "agents-context");
 
       // Ensure directory exists
       try {
@@ -652,6 +652,24 @@ Begin by assessing what's been done and what remains to be completed.`;
       }
     } catch (error) {
       console.error("[AutoMode] Failed to write to context file:", error);
+    }
+  }
+
+  /**
+   * Delete agent context file for a feature
+   */
+  async deleteContextFile(projectPath, featureId) {
+    if (!projectPath) return;
+
+    try {
+      const contextPath = path.join(projectPath, ".automaker", "agents-context", `${featureId}.md`);
+      await fs.unlink(contextPath);
+      console.log(`[AutoMode] Deleted agent context for feature ${featureId}`);
+    } catch (error) {
+      // File might not exist, which is fine
+      if (error.code !== 'ENOENT') {
+        console.error("[AutoMode] Failed to delete context file:", error);
+      }
     }
   }
 
@@ -895,6 +913,11 @@ Begin by assessing what's been done and what remains to be completed.`;
 
     await fs.writeFile(featuresPath, JSON.stringify(toSave, null, 2), "utf-8");
     console.log(`[AutoMode] Updated feature ${featureId}: status=${status}`);
+
+    // Delete agent context file when feature is verified
+    if (status === "verified") {
+      await this.deleteContextFile(projectPath, featureId);
+    }
   }
 
   /**
