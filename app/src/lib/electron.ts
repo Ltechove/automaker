@@ -369,9 +369,13 @@ export interface ElectronAPI {
     }>;
     authClaude: () => Promise<{
       success: boolean;
+      token?: string;
       requiresManualAuth?: boolean;
+      terminalOpened?: boolean;
       command?: string;
       error?: string;
+      message?: string;
+      output?: string;
     }>;
     authCodex: (apiKey?: string) => Promise<{
       success: boolean;
@@ -781,9 +785,13 @@ interface SetupAPI {
   }>;
   authClaude: () => Promise<{
     success: boolean;
+    token?: string;
     requiresManualAuth?: boolean;
+    terminalOpened?: boolean;
     command?: string;
     error?: string;
+    message?: string;
+    output?: string;
   }>;
   authCodex: (apiKey?: string) => Promise<{
     success: boolean;

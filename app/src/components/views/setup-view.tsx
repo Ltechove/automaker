@@ -31,6 +31,7 @@ import {
   Shield,
 } from "lucide-react";
 import { toast } from "sonner";
+import { SetupTokenModal } from "./setup-token-modal";
 
 // Step indicator component
 function StepIndicator({
@@ -212,6 +213,7 @@ function ClaudeSetupStep({
   const [oauthToken, setOAuthToken] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [showTokenModal, setShowTokenModal] = useState(false);
 
   const checkStatus = useCallback(async () => {
     console.log("[Claude Setup] Starting status check...");
@@ -470,6 +472,49 @@ function ClaudeSetupStep({
     toast.success("Command copied to clipboard");
   };
 
+  // Handle token obtained from the OAuth modal
+  const handleTokenFromModal = useCallback(
+    async (token: string) => {
+      setOAuthToken(token);
+      setShowTokenModal(false);
+
+      // Auto-save the token
+      setIsSaving(true);
+      try {
+        const api = getElectronAPI();
+        const setupApi = api.setup;
+
+        if (setupApi?.storeApiKey) {
+          const result = await setupApi.storeApiKey(
+            "anthropic_oauth_token",
+            token
+          );
+          console.log("[Claude Setup] Store OAuth token result:", result);
+
+          if (result.success) {
+            setClaudeAuthStatus({
+              authenticated: true,
+              method: "oauth_token",
+              hasCredentialsFile: false,
+              oauthTokenValid: true,
+            });
+            toast.success("Claude subscription token saved");
+            setAuthMethod(null);
+            await checkStatus();
+          } else {
+            toast.error("Failed to save token", { description: result.error });
+          }
+        }
+      } catch (error) {
+        console.error("[Claude Setup] Failed to save OAuth token:", error);
+        toast.error("Failed to save token");
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [checkStatus, setClaudeAuthStatus]
+  );
+
   const isAuthenticated = claudeAuthStatus?.authenticated || apiKeys.anthropic;
 
   const getAuthMethodLabel = () => {
@@ -666,31 +711,40 @@ function ClaudeSetupStep({
 
                     {claudeCliStatus?.installed ? (
                       <>
-                        <div className="mb-3">
-                          <p className="text-sm text-muted-foreground mb-2">
-                            1. Run this command in your terminal:
-                          </p>
-                          <div className="flex items-center gap-2">
-                            <code className="flex-1 bg-muted px-3 py-2 rounded text-sm font-mono text-foreground">
-                              claude setup-token
-                            </code>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => copyCommand("claude setup-token")}
-                            >
-                              <Copy className="w-4 h-4" />
-                            </Button>
+                        {/* Primary: Automated OAuth setup */}
+                        <Button
+                          onClick={() => setShowTokenModal(true)}
+                          className="w-full bg-brand-500 hover:bg-brand-600 text-white mb-4"
+                          data-testid="setup-oauth-button"
+                        >
+                          <Terminal className="w-4 h-4 mr-2" />
+                          Setup with OAuth
+                        </Button>
+
+                        {/* Divider */}
+                        <div className="relative my-4">
+                          <div className="absolute inset-0 flex items-center">
+                            <span className="w-full border-t border-border" />
+                          </div>
+                          <div className="relative flex justify-center text-xs uppercase">
+                            <span className="bg-brand-500/5 px-2 text-muted-foreground">
+                              or paste manually
+                            </span>
                           </div>
                         </div>
 
+                        {/* Fallback: Manual token entry */}
                         <div className="space-y-2">
-                          <Label className="text-foreground">
-                            2. Paste the token here:
+                          <Label className="text-foreground text-sm">
+                            Paste token from{" "}
+                            <code className="bg-muted px-1 py-0.5 rounded text-xs">
+                              claude setup-token
+                            </code>
+                            :
                           </Label>
                           <Input
                             type="password"
-                            placeholder="Paste token from claude setup-token..."
+                            placeholder="Paste token here..."
                             value={oauthToken}
                             onChange={(e) => setOAuthToken(e.target.value)}
                             className="bg-input border-border text-foreground"
@@ -893,6 +947,13 @@ function ClaudeSetupStep({
           </Button>
         </div>
       </div>
+
+      {/* OAuth Setup Modal */}
+      <SetupTokenModal
+        open={showTokenModal}
+        onClose={() => setShowTokenModal(false)}
+        onTokenObtained={handleTokenFromModal}
+      />
     </div>
   );
 }
