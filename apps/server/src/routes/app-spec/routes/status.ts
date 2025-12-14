@@ -3,10 +3,7 @@
  */
 
 import type { Request, Response } from "express";
-import {
-  getSpecRegenerationStatus,
-  getErrorMessage,
-} from "../common.js";
+import { getSpecRegenerationStatus, getErrorMessage } from "../common.js";
 
 export function createStatusHandler() {
   return async (_req: Request, res: Response): Promise<void> => {

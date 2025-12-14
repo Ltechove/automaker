@@ -3,11 +3,7 @@
  */
 
 import type { Request, Response } from "express";
-import {
-  getSuggestionsStatus,
-  getErrorMessage,
-  logError,
-} from "../common.js";
+import { getSuggestionsStatus, getErrorMessage, logError } from "../common.js";
 
 export function createStatusHandler() {
   return async (_req: Request, res: Response): Promise<void> => {

@@ -3,18 +3,15 @@
  */
 
 import type { Request, Response } from "express";
-import {
-  getApiKey,
-  getErrorMessage,
-  logError,
-} from "../common.js";
+import { getApiKey, getErrorMessage, logError } from "../common.js";
 
 export function createApiKeysHandler() {
   return async (_req: Request, res: Response): Promise<void> => {
     try {
       res.json({
         success: true,
-        hasAnthropicKey: !!getApiKey("anthropic") || !!process.env.ANTHROPIC_API_KEY,
+        hasAnthropicKey:
+          !!getApiKey("anthropic") || !!process.env.ANTHROPIC_API_KEY,
         hasGoogleKey: !!getApiKey("google") || !!process.env.GOOGLE_API_KEY,
       });
     } catch (error) {

@@ -106,6 +106,8 @@ Format your response as JSON:
       throw new Error("No valid JSON found in response");
     }
   } catch (error) {
+    // Log the parsing error for debugging
+    logger.error("Failed to parse suggestions JSON from AI response:", error);
     // Return generic suggestions if parsing fails
     events.emit("suggestions:event", {
       type: "suggestions_complete",
