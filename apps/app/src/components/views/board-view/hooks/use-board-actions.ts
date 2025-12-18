@@ -102,7 +102,8 @@ export function useBoardActions({
     }) => {
       // Simplified: Only store branchName, no worktree creation on add
       // Worktrees are created at execution time (when feature starts)
-      // Empty string means user chose "use current branch" - don't save a branch name
+      // Empty string means "unassigned" (show only on primary worktree) - convert to undefined
+      // Non-empty string is the actual branch name (for non-primary worktrees)
       const finalBranchName = featureData.branchName || undefined;
 
       const newFeatureData = {

@@ -150,10 +150,11 @@ export function EditFeatureDialog({
       ? editingFeature.thinkingLevel ?? "none"
       : "none";
 
-    // Use current branch if toggle is on (empty string = use current), otherwise use selected branch
-    // Important: Don't save the actual current branch name - empty string means "use current"
+    // Use current branch if toggle is on
+    // If currentBranch is provided (non-primary worktree), use it
+    // Otherwise (primary worktree), use empty string which means "unassigned" (show only on primary)
     const finalBranchName = useCurrentBranch
-      ? ""
+      ? (currentBranch || "")
       : editingFeature.branchName || "";
 
     const updates = {
