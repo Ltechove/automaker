@@ -11,7 +11,7 @@
 import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
-import { createTempDirPath, cleanupTempDir, setupWelcomeView } from './utils';
+import { createTempDirPath, cleanupTempDir, setupWelcomeView } from '../utils';
 
 // Create unique temp dir for this test run
 const TEST_TEMP_DIR = createTempDirPath('open-project-test');

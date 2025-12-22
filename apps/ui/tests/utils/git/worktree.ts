@@ -353,7 +353,7 @@ export async function setupProjectWithPath(page: Page, projectPath: string): Pro
         currentStep: 'complete',
         skipClaudeSetup: false,
       },
-      version: 2, // Must match app-store.ts persist version
+      version: 0, // setup-store.ts doesn't specify a version, so zustand defaults to 0
     };
     localStorage.setItem('automaker-setup', JSON.stringify(setupState));
   }, projectPath);
@@ -404,7 +404,7 @@ export async function setupProjectWithPathNoWorktrees(
         currentStep: 'complete',
         skipClaudeSetup: false,
       },
-      version: 2, // Must match app-store.ts persist version
+      version: 0, // setup-store.ts doesn't specify a version, so zustand defaults to 0
     };
     localStorage.setItem('automaker-setup', JSON.stringify(setupState));
   }, projectPath);
@@ -459,7 +459,7 @@ export async function setupProjectWithStaleWorktree(
         currentStep: 'complete',
         skipClaudeSetup: false,
       },
-      version: 2, // Must match app-store.ts persist version
+      version: 0, // setup-store.ts doesn't specify a version, so zustand defaults to 0
     };
     localStorage.setItem('automaker-setup', JSON.stringify(setupState));
   }, projectPath);

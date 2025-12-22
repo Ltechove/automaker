@@ -107,7 +107,7 @@ export async function setupProjectWithFixture(
         currentStep: 'complete',
         skipClaudeSetup: false,
       },
-      version: 2, // Must match app-store.ts persist version
+      version: 0, // setup-store.ts doesn't specify a version, so zustand defaults to 0
     };
     localStorage.setItem('automaker-setup', JSON.stringify(setupState));
   }, projectPath);
