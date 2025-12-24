@@ -25,7 +25,11 @@ import { promisify } from 'util';
 import path from 'path';
 import * as secureFs from '../lib/secure-fs.js';
 import type { EventEmitter } from '../lib/events.js';
-import { createAutoModeOptions, validateWorkingDirectory } from '../lib/sdk-options.js';
+import {
+  createAutoModeOptions,
+  createCustomOptions,
+  validateWorkingDirectory,
+} from '../lib/sdk-options.js';
 import { FeatureLoader } from './feature-loader.js';
 import type { SettingsService } from './settings-service.js';
 
@@ -1068,11 +1072,6 @@ Address the follow-up instructions above. Review the previous work and make the 
    * Analyze project to gather context
    */
   async analyzeProject(projectPath: string): Promise<void> {
-    // Validate project path before proceeding
-    // This is called here because analyzeProject builds ExecuteOptions directly
-    // without using a factory function from sdk-options.ts
-    validateWorkingDirectory(projectPath);
-
     const abortController = new AbortController();
 
     const analysisFeatureId = `analysis-${Date.now()}`;
@@ -1100,13 +1099,27 @@ Format your response as a structured markdown document.`;
       const analysisModel = resolveModelString(undefined, DEFAULT_MODELS.claude);
       const provider = ProviderFactory.getProviderForModel(analysisModel);
 
-      const options: ExecuteOptions = {
-        prompt,
+      // Load autoLoadClaudeMd setting
+      const autoLoadClaudeMd = await this.getAutoLoadClaudeMdSetting(projectPath);
+
+      // Use createCustomOptions for centralized SDK configuration with CLAUDE.md support
+      const sdkOptions = createCustomOptions({
+        cwd: projectPath,
         model: analysisModel,
         maxTurns: 5,
-        cwd: projectPath,
         allowedTools: ['Read', 'Glob', 'Grep'],
         abortController,
+        autoLoadClaudeMd,
+      });
+
+      const options: ExecuteOptions = {
+        prompt,
+        model: sdkOptions.model ?? analysisModel,
+        cwd: sdkOptions.cwd ?? projectPath,
+        maxTurns: sdkOptions.maxTurns,
+        allowedTools: sdkOptions.allowedTools as string[],
+        abortController,
+        settingSources: sdkOptions.settingSources,
       };
 
       const stream = provider.executeQuery(options);
