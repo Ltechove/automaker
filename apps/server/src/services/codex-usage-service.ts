@@ -139,24 +139,29 @@ export class CodexUsageService {
         return 'unknown';
       }
 
-      // Extract plan type from nested OpenAI auth object
-      const openaiAuth = claims['https://api.openai.com/auth'] as
-        | {
-            chatgpt_plan_type?: string;
-            chatgpt_subscription_active_until?: string;
-          }
-        | undefined;
+      // Extract plan type from nested OpenAI auth object with type validation
+      const openaiAuthClaim = claims['https://api.openai.com/auth'];
 
       let accountType: string | undefined;
       let isSubscriptionExpired = false;
 
-      if (openaiAuth) {
-        accountType = openaiAuth.chatgpt_plan_type;
+      if (
+        openaiAuthClaim &&
+        typeof openaiAuthClaim === 'object' &&
+        !Array.isArray(openaiAuthClaim)
+      ) {
+        const openaiAuth = openaiAuthClaim as Record<string, unknown>;
+
+        if (typeof openaiAuth.chatgpt_plan_type === 'string') {
+          accountType = openaiAuth.chatgpt_plan_type;
+        }
 
         // Check if subscription has expired
-        if (openaiAuth.chatgpt_subscription_active_until) {
+        if (typeof openaiAuth.chatgpt_subscription_active_until === 'string') {
           const expiryDate = new Date(openaiAuth.chatgpt_subscription_active_until);
-          isSubscriptionExpired = expiryDate < new Date();
+          if (!isNaN(expiryDate.getTime())) {
+            isSubscriptionExpired = expiryDate < new Date();
+          }
         }
       } else {
         // Fallback: try top-level claim names
@@ -168,8 +173,9 @@ export class CodexUsageService {
         ];
 
         for (const claimName of possibleClaimNames) {
-          if (claims[claimName]) {
-            accountType = claims[claimName];
+          const claimValue = claims[claimName];
+          if (claimValue && typeof claimValue === 'string') {
+            accountType = claimValue;
             break;
           }
         }
@@ -334,36 +340,14 @@ export class CodexUsageService {
 
   /**
    * Try to extract usage info from the Codex auth file
+   * Reuses getPlanTypeFromAuthFile to avoid code duplication
    */
   private async fetchFromAuthFile(): Promise<CodexUsageData | null> {
     try {
-      const authFilePath = getCodexAuthPath();
+      const planType = await this.getPlanTypeFromAuthFile();
 
-      if (!(await systemPathExists(authFilePath))) {
+      if (planType === 'unknown') {
         return null;
-      }
-
-      const authContent = await systemPathReadFile(authFilePath);
-      const authData = JSON.parse(authContent);
-
-      if (!authData.tokens?.id_token) {
-        return null;
-      }
-
-      const claims = this.parseJwt(authData.tokens.id_token);
-      if (!claims) {
-        return null;
-      }
-
-      const accountType = claims?.['https://chatgpt.com/account_type'];
-
-      // Normalize to our plan types
-      let planType: CodexPlanType = 'unknown';
-      if (accountType) {
-        const normalizedType = accountType.toLowerCase();
-        if (['free', 'plus', 'pro', 'team', 'enterprise', 'edu'].includes(normalizedType)) {
-          planType = normalizedType as CodexPlanType;
-        }
       }
 
       const isFreePlan = planType === 'free';
@@ -373,7 +357,7 @@ export class CodexUsageService {
           planType,
           credits: {
             hasCredits: true,
-            unlimited: !isFreePlan && planType !== 'unknown',
+            unlimited: !isFreePlan,
           },
         },
         lastUpdated: new Date().toISOString(),
