@@ -75,23 +75,16 @@ services:
     command:
       - -c
       - |
-        # Fix permissions on node_modules (created as root by Docker volume)
-        echo 'Fixing node_modules permissions...'
-        rm -rf /app/node_modules 2>/dev/null || true
-        rm -rf /app/apps/ui/node_modules 2>/dev/null || true
-        mkdir -p /app/node_modules
-        chown -R automaker:automaker /app/node_modules
-        chmod -R u+rwX /app/node_modules
+        # Install as root to avoid permission issues with named volumes
+        echo 'Installing dependencies...' &&
+        npm ci --legacy-peer-deps &&
+        echo 'Building shared packages...' &&
+        npm run build:packages &&
 
-        # Run the rest as automaker user
-        exec gosu automaker sh -c "
-          echo 'Installing dependencies...' &&
-          npm ci --force &&
-          echo 'Building shared packages...' &&
-          npm run build:packages &&
-          echo 'Starting server in development mode...' &&
-          npm run _dev:server
-        "
+        # Fix permissions and start server as automaker user
+        chown -R automaker:automaker /app/node_modules &&
+        echo 'Starting server in development mode...' &&
+        exec gosu automaker npm run _dev:server
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:3008/api/health']
       interval: 10s
