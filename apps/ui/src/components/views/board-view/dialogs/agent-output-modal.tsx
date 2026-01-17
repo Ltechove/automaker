@@ -453,7 +453,7 @@ export function AgentOutputModal({
             <div
               ref={scrollRef}
               onScroll={handleScroll}
-              className="flex-1 min-h-0 sm:min-h-[200px] sm:max-h-[60vh] overflow-y-auto bg-zinc-950 rounded-lg p-4 font-mono text-xs scrollbar-visible"
+              className="flex-1 min-h-0 sm:min-h-[200px] sm:max-h-[60vh] overflow-y-auto bg-popover border border-border/50 rounded-lg p-4 font-mono text-xs scrollbar-visible"
             >
               {isLoading && !output ? (
                 <div className="flex items-center justify-center h-full text-muted-foreground">
@@ -467,7 +467,9 @@ export function AgentOutputModal({
               ) : effectiveViewMode === 'parsed' ? (
                 <LogViewer output={output} />
               ) : (
-                <div className="whitespace-pre-wrap wrap-break-word text-zinc-300">{output}</div>
+                <div className="whitespace-pre-wrap wrap-break-word text-foreground/80">
+                  {output}
+                </div>
               )}
             </div>
 
