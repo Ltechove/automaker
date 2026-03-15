@@ -94,6 +94,7 @@ export {
   CODEX_MODEL_IDS,
   REASONING_CAPABLE_MODELS,
   supportsReasoningEffort,
+  normalizeReasoningEffortForModel,
   getAllCodexModelIds,
   DEFAULT_MODELS,
   type ClaudeCanonicalId,
@@ -171,8 +172,13 @@ export type {
   EventHookHttpMethod,
   EventHookShellAction,
   EventHookHttpAction,
+  EventHookNtfyAction,
   EventHookAction,
   EventHook,
+  EventHookContext,
+  // Ntfy notification types
+  NtfyAuthenticationType,
+  NtfyEndpointConfig,
   // Feature template types
   FeatureTemplate,
   // Claude-compatible provider types (new)
@@ -285,6 +291,7 @@ export {
   normalizeModelString,
   validateBareModelId,
   supportsStructuredOutput,
+  PROVIDER_PREFIX_EXCEPTIONS,
 } from './provider-utils.js';
 
 // Model migration utilities
@@ -306,6 +313,7 @@ export type {
   PipelineStatus,
   FeatureStatusWithPipeline,
 } from './pipeline.js';
+export { isPipelineStatus } from './pipeline.js';
 
 // Port configuration
 export { STATIC_PORT, SERVER_PORT, RESERVED_PORTS } from './ports.js';

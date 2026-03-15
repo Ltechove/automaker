@@ -451,11 +451,26 @@ describe('execution-service.ts', () => {
       const callArgs = mockRunAgentFn.mock.calls[0];
       expect(callArgs[0]).toMatch(/test.*project/); // workDir contains project
       expect(callArgs[1]).toBe('feature-1');
-      expect(callArgs[2]).toContain('Feature Implementation Task');
+      expect(callArgs[2]).toContain('Feature Task');
       expect(callArgs[3]).toBeInstanceOf(AbortController);
       expect(callArgs[4]).toBe('/test/project');
       // Model (index 6) should be resolved
       expect(callArgs[6]).toBe('claude-sonnet-4');
+    });
+
+    it('passes providerId to runAgentFn when present on feature', async () => {
+      const featureWithProvider: Feature = {
+        ...testFeature,
+        providerId: 'zai-provider-1',
+      };
+      vi.mocked(mockLoadFeatureFn).mockResolvedValue(featureWithProvider);
+
+      await service.executeFeature('/test/project', 'feature-1');
+
+      expect(mockRunAgentFn).toHaveBeenCalled();
+      const callArgs = mockRunAgentFn.mock.calls[0];
+      const options = callArgs[7];
+      expect(options.providerId).toBe('zai-provider-1');
     });
 
     it('executes pipeline after agent completes', async () => {
@@ -1316,16 +1331,19 @@ describe('execution-service.ts', () => {
       );
     });
 
-    it('falls back to project path when worktree not found', async () => {
+    it('emits error and does not execute agent when worktree is not found in worktree mode', async () => {
       vi.mocked(mockWorktreeResolver.findWorktreeForBranch).mockResolvedValue(null);
 
       await service.executeFeature('/test/project', 'feature-1', true);
 
-      // Should still run agent, just with project path
-      expect(mockRunAgentFn).toHaveBeenCalled();
-      const callArgs = mockRunAgentFn.mock.calls[0];
-      // First argument is workDir - should be normalized path to /test/project
-      expect(callArgs[0]).toBe(normalizePath('/test/project'));
+      expect(mockRunAgentFn).not.toHaveBeenCalled();
+      expect(mockEventBus.emitAutoModeEvent).toHaveBeenCalledWith(
+        'auto_mode_error',
+        expect.objectContaining({
+          featureId: 'feature-1',
+          error: 'Worktree enabled but no worktree found for feature branch "feature/test-1".',
+        })
+      );
     });
 
     it('skips worktree resolution when useWorktrees is false', async () => {
@@ -1438,6 +1456,114 @@ describe('execution-service.ts', () => {
         'auto_mode_feature_complete',
         expect.objectContaining({ passes: true })
       );
+    });
+
+    // Helper to create ExecutionService with a custom loadFeatureFn that returns
+    // different features on first load (initial) vs subsequent loads (after completion)
+    const createServiceWithCustomLoad = (completedFeature: Feature): ExecutionService => {
+      let loadCallCount = 0;
+      mockLoadFeatureFn = vi.fn().mockImplementation(() => {
+        loadCallCount++;
+        return loadCallCount === 1 ? testFeature : completedFeature;
+      });
+
+      return new ExecutionService(
+        mockEventBus,
+        mockConcurrencyManager,
+        mockWorktreeResolver,
+        mockSettingsService,
+        mockRunAgentFn,
+        mockExecutePipelineFn,
+        mockUpdateFeatureStatusFn,
+        mockLoadFeatureFn,
+        mockGetPlanningPromptPrefixFn,
+        mockSaveFeatureSummaryFn,
+        mockRecordLearningsFn,
+        mockContextExistsFn,
+        mockResumeFeatureFn,
+        mockTrackFailureFn,
+        mockSignalPauseFn,
+        mockRecordSuccessFn,
+        mockSaveExecutionStateFn,
+        mockLoadContextFilesFn
+      );
+    };
+
+    it('does not overwrite accumulated summary when feature already has one', async () => {
+      const featureWithAccumulatedSummary: Feature = {
+        ...testFeature,
+        summary:
+          '### Implementation\n\nFirst step output\n\n---\n\n### Code Review\n\nReview findings',
+      };
+
+      const svc = createServiceWithCustomLoad(featureWithAccumulatedSummary);
+      await svc.executeFeature('/test/project', 'feature-1');
+
+      // saveFeatureSummaryFn should NOT be called because feature already has a summary
+      // This prevents overwriting accumulated pipeline summaries with just the last step's output
+      expect(mockSaveFeatureSummaryFn).not.toHaveBeenCalled();
+    });
+
+    it('saves summary when feature has no existing summary', async () => {
+      const featureWithoutSummary: Feature = {
+        ...testFeature,
+        summary: undefined,
+      };
+
+      vi.mocked(secureFs.readFile).mockResolvedValue(
+        '🔧 Tool: Edit\nInput: {"file_path": "/src/index.ts"}\n\n<summary>New summary</summary>'
+      );
+
+      const svc = createServiceWithCustomLoad(featureWithoutSummary);
+      await svc.executeFeature('/test/project', 'feature-1');
+
+      // Should save the extracted summary since feature has none
+      expect(mockSaveFeatureSummaryFn).toHaveBeenCalledWith(
+        '/test/project',
+        'feature-1',
+        'Test summary'
+      );
+    });
+
+    it('does not overwrite summary when feature has empty string summary (treats as no summary)', async () => {
+      // Empty string is falsy, so it should be treated as "no summary" and a new one should be saved
+      const featureWithEmptySummary: Feature = {
+        ...testFeature,
+        summary: '',
+      };
+
+      vi.mocked(secureFs.readFile).mockResolvedValue(
+        '🔧 Tool: Edit\nInput: {"file_path": "/src/index.ts"}\n\n<summary>New summary</summary>'
+      );
+
+      const svc = createServiceWithCustomLoad(featureWithEmptySummary);
+      await svc.executeFeature('/test/project', 'feature-1');
+
+      // Empty string is falsy, so it should save a new summary
+      expect(mockSaveFeatureSummaryFn).toHaveBeenCalledWith(
+        '/test/project',
+        'feature-1',
+        'Test summary'
+      );
+    });
+
+    it('preserves accumulated summary when feature is transitioned from pipeline to verified', async () => {
+      // This is the key scenario: feature went through pipeline steps, accumulated a summary,
+      // then status changed to 'verified' - we should NOT overwrite the accumulated summary
+      const featureWithAccumulatedSummary: Feature = {
+        ...testFeature,
+        status: 'verified',
+        summary:
+          '### Implementation\n\nCreated auth module\n\n---\n\n### Code Review\n\nApproved\n\n---\n\n### Testing\n\nAll tests pass',
+      };
+
+      vi.mocked(secureFs.readFile).mockResolvedValue('Agent output with summary');
+
+      const svc = createServiceWithCustomLoad(featureWithAccumulatedSummary);
+      await svc.executeFeature('/test/project', 'feature-1');
+
+      // The accumulated summary should be preserved
+      expect(mockSaveFeatureSummaryFn).not.toHaveBeenCalled();
     });
   });
 
@@ -1873,6 +1999,61 @@ describe('execution-service.ts', () => {
         .mock.calls.filter((call) => call[2] === 'verified' || call[2] === 'waiting_approval');
       // The only non-in_progress status call should be absent since merge_conflict returns early
       expect(statusCalls.length).toBe(0);
+    });
+
+    it('sets waiting_approval instead of backlog when error occurs after pipeline completes', async () => {
+      // Set up pipeline with steps
+      vi.mocked(pipelineService.getPipelineConfig).mockResolvedValue({
+        version: 1,
+        steps: [{ id: 'step-1', name: 'Step 1', order: 1, instructions: 'Do step 1' }] as any,
+      });
+
+      // Pipeline succeeds, but reading agent output throws after pipeline completes
+      mockExecutePipelineFn = vi.fn().mockResolvedValue(undefined);
+      // Simulate an error after pipeline completes by making loadFeature throw
+      // on the post-pipeline refresh call
+      let loadCallCount = 0;
+      mockLoadFeatureFn = vi.fn().mockImplementation(() => {
+        loadCallCount++;
+        if (loadCallCount === 1) return testFeature; // initial load
+        // Second call is the task-retry check, third is the pipeline refresh
+        if (loadCallCount <= 2) return testFeature;
+        throw new Error('Unexpected post-pipeline error');
+      });
+
+      const svc = createServiceWithMocks();
+      await svc.executeFeature('/test/project', 'feature-1');
+
+      // Should set to waiting_approval, NOT backlog, since pipeline completed
+      const backlogCalls = vi
+        .mocked(mockUpdateFeatureStatusFn)
+        .mock.calls.filter((call) => call[2] === 'backlog');
+      expect(backlogCalls.length).toBe(0);
+
+      const waitingCalls = vi
+        .mocked(mockUpdateFeatureStatusFn)
+        .mock.calls.filter((call) => call[2] === 'waiting_approval');
+      expect(waitingCalls.length).toBeGreaterThan(0);
+    });
+
+    it('still sets backlog when error occurs before pipeline completes', async () => {
+      // Set up pipeline with steps
+      vi.mocked(pipelineService.getPipelineConfig).mockResolvedValue({
+        version: 1,
+        steps: [{ id: 'step-1', name: 'Step 1', order: 1, instructions: 'Do step 1' }] as any,
+      });
+
+      // Pipeline itself throws (e.g., agent error during pipeline step)
+      mockExecutePipelineFn = vi.fn().mockRejectedValue(new Error('Agent execution failed'));
+
+      const svc = createServiceWithMocks();
+      await svc.executeFeature('/test/project', 'feature-1');
+
+      // Should still set to backlog since pipeline did NOT complete
+      const backlogCalls = vi
+        .mocked(mockUpdateFeatureStatusFn)
+        .mock.calls.filter((call) => call[2] === 'backlog');
+      expect(backlogCalls.length).toBe(1);
     });
   });
 });

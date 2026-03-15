@@ -39,6 +39,7 @@ import {
   migratePhaseModelEntry,
   type GlobalSettings,
   type CursorModelId,
+  type PhaseModelEntry,
 } from '@automaker/types';
 
 const logger = createLogger('SettingsMigration');
@@ -174,6 +175,7 @@ export function parseLocalStorageSettings(): Partial<GlobalSettings> | null {
       defaultRequirePlanApproval: state.defaultRequirePlanApproval as boolean,
       muteDoneSound: state.muteDoneSound as boolean,
       disableSplashScreen: state.disableSplashScreen as boolean,
+      defaultSortNewestCardOnTop: state.defaultSortNewestCardOnTop as boolean,
       enhancementModel: state.enhancementModel as GlobalSettings['enhancementModel'],
       validationModel: state.validationModel as GlobalSettings['validationModel'],
       phaseModels: state.phaseModels as GlobalSettings['phaseModels'],
@@ -197,6 +199,8 @@ export function parseLocalStorageSettings(): Partial<GlobalSettings> | null {
       mcpServers: state.mcpServers as GlobalSettings['mcpServers'],
       promptCustomization: state.promptCustomization as GlobalSettings['promptCustomization'],
       eventHooks: state.eventHooks as GlobalSettings['eventHooks'],
+      ntfyEndpoints: state.ntfyEndpoints as GlobalSettings['ntfyEndpoints'],
+      featureTemplates: state.featureTemplates as GlobalSettings['featureTemplates'],
       projects: state.projects as GlobalSettings['projects'],
       trashedProjects: state.trashedProjects as GlobalSettings['trashedProjects'],
       currentProjectId: (state.currentProject as { id?: string } | null)?.id ?? null,
@@ -204,6 +208,7 @@ export function parseLocalStorageSettings(): Partial<GlobalSettings> | null {
       projectHistoryIndex: state.projectHistoryIndex as number,
       lastSelectedSessionByProject:
         state.lastSelectedSessionByProject as GlobalSettings['lastSelectedSessionByProject'],
+      agentModelBySession: state.agentModelBySession as GlobalSettings['agentModelBySession'],
       // UI State from standalone localStorage keys or Zustand state
       worktreePanelCollapsed:
         worktreePanelCollapsed === 'true' || (state.worktreePanelCollapsed as boolean),
@@ -330,6 +335,15 @@ export function mergeSettings(
     Object.keys(localSettings.lastSelectedSessionByProject).length > 0
   ) {
     merged.lastSelectedSessionByProject = localSettings.lastSelectedSessionByProject;
+  }
+
+  if (
+    (!serverSettings.agentModelBySession ||
+      Object.keys(serverSettings.agentModelBySession).length === 0) &&
+    localSettings.agentModelBySession &&
+    Object.keys(localSettings.agentModelBySession).length > 0
+  ) {
+    merged.agentModelBySession = localSettings.agentModelBySession;
   }
 
   // For simple values, use localStorage if server value is default/undefined
@@ -675,6 +689,12 @@ export function hydrateStoreFromSettings(settings: GlobalSettings): void {
     (modelId) => !modelId.startsWith('amazon-bedrock/')
   );
 
+  const persistedKnownDynamicModelIds =
+    settings.knownDynamicModelIds ?? current.knownDynamicModelIds;
+  const sanitizedKnownDynamicModelIds = persistedKnownDynamicModelIds.filter(
+    (modelId) => !modelId.startsWith('amazon-bedrock/')
+  );
+
   // Convert ProjectRef[] to Project[] (minimal data, features will be loaded separately)
   const projects = (settings.projects ?? []).map((ref) => ({
     id: ref.id,
@@ -754,6 +774,7 @@ export function hydrateStoreFromSettings(settings: GlobalSettings): void {
     },
     muteDoneSound: settings.muteDoneSound ?? false,
     disableSplashScreen: settings.disableSplashScreen ?? false,
+    defaultSortNewestCardOnTop: settings.defaultSortNewestCardOnTop ?? false,
     serverLogLevel: settings.serverLogLevel ?? 'info',
     enableRequestLogging: settings.enableRequestLogging ?? true,
     showQueryDevtools: settings.showQueryDevtools ?? true,
@@ -767,6 +788,7 @@ export function hydrateStoreFromSettings(settings: GlobalSettings): void {
     enabledOpencodeModels: sanitizedEnabledOpencodeModels,
     opencodeDefaultModel: sanitizedOpencodeDefaultModel,
     enabledDynamicModelIds: sanitizedDynamicModelIds,
+    knownDynamicModelIds: sanitizedKnownDynamicModelIds,
     disabledProviders: settings.disabledProviders ?? [],
     enableAiCommitMessages: settings.enableAiCommitMessages ?? true,
     enableSkills: settings.enableSkills ?? true,
@@ -790,6 +812,8 @@ export function hydrateStoreFromSettings(settings: GlobalSettings): void {
     mcpServers: settings.mcpServers ?? [],
     promptCustomization: settings.promptCustomization ?? {},
     eventHooks: settings.eventHooks ?? [],
+    ntfyEndpoints: settings.ntfyEndpoints ?? [],
+    featureTemplates: settings.featureTemplates ?? [],
     claudeCompatibleProviders: settings.claudeCompatibleProviders ?? [],
     claudeApiProfiles: settings.claudeApiProfiles ?? [],
     activeClaudeApiProfileId: settings.activeClaudeApiProfileId ?? null,
@@ -799,18 +823,21 @@ export function hydrateStoreFromSettings(settings: GlobalSettings): void {
     projectHistory: settings.projectHistory ?? [],
     projectHistoryIndex: settings.projectHistoryIndex ?? -1,
     lastSelectedSessionByProject: settings.lastSelectedSessionByProject ?? {},
-    // Sanitize currentWorktreeByProject: only restore entries where path is null
-    // (main branch). Non-null paths point to worktree directories that may have
-    // been deleted while the app was closed. Restoring a stale path causes the
-    // board to render an invalid worktree selection, triggering a crash loop
-    // (error boundary reloads → restores same bad path → crash again).
-    // The use-worktrees validation effect will re-discover valid worktrees
-    // from the server once they load.
-    currentWorktreeByProject: Object.fromEntries(
-      Object.entries(sanitizeWorktreeByProject(settings.currentWorktreeByProject)).filter(
-        ([, worktree]) => worktree.path === null
-      )
-    ),
+    agentModelBySession: settings.agentModelBySession
+      ? Object.fromEntries(
+          Object.entries(settings.agentModelBySession as Record<string, unknown>).map(
+            ([sessionId, entry]) => [
+              sessionId,
+              migratePhaseModelEntry(entry as string | PhaseModelEntry | null | undefined),
+            ]
+          )
+        )
+      : current.agentModelBySession,
+    // Restore all valid worktree selections (both main branch and feature worktrees).
+    // The validation effect in use-worktrees.ts handles deleted worktrees gracefully
+    // by resetting to main branch when the worktree list loads and the cached
+    // worktree no longer exists.
+    currentWorktreeByProject: sanitizeWorktreeByProject(settings.currentWorktreeByProject),
     // UI State
     worktreePanelCollapsed: settings.worktreePanelCollapsed ?? false,
     lastProjectDir: settings.lastProjectDir ?? '',
@@ -889,6 +916,7 @@ function buildSettingsUpdateFromStore(): Record<string, unknown> {
     defaultRequirePlanApproval: state.defaultRequirePlanApproval,
     muteDoneSound: state.muteDoneSound,
     disableSplashScreen: state.disableSplashScreen,
+    defaultSortNewestCardOnTop: state.defaultSortNewestCardOnTop,
     serverLogLevel: state.serverLogLevel,
     enableRequestLogging: state.enableRequestLogging,
     enhancementModel: state.enhancementModel,
@@ -897,6 +925,7 @@ function buildSettingsUpdateFromStore(): Record<string, unknown> {
     defaultThinkingLevel: state.defaultThinkingLevel,
     defaultReasoningEffort: state.defaultReasoningEffort,
     enabledDynamicModelIds: state.enabledDynamicModelIds,
+    knownDynamicModelIds: state.knownDynamicModelIds,
     disabledProviders: state.disabledProviders,
     enableAiCommitMessages: state.enableAiCommitMessages,
     enableSkills: state.enableSkills,
@@ -917,6 +946,8 @@ function buildSettingsUpdateFromStore(): Record<string, unknown> {
     mcpServers: state.mcpServers,
     promptCustomization: state.promptCustomization,
     eventHooks: state.eventHooks,
+    ntfyEndpoints: state.ntfyEndpoints,
+    featureTemplates: state.featureTemplates,
     claudeCompatibleProviders: state.claudeCompatibleProviders,
     claudeApiProfiles: state.claudeApiProfiles,
     activeClaudeApiProfileId: state.activeClaudeApiProfileId,
@@ -926,6 +957,7 @@ function buildSettingsUpdateFromStore(): Record<string, unknown> {
     projectHistory: state.projectHistory,
     projectHistoryIndex: state.projectHistoryIndex,
     lastSelectedSessionByProject: state.lastSelectedSessionByProject,
+    agentModelBySession: state.agentModelBySession,
     currentWorktreeByProject: state.currentWorktreeByProject,
     worktreePanelCollapsed: state.worktreePanelCollapsed,
     lastProjectDir: state.lastProjectDir,

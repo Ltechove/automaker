@@ -3,7 +3,15 @@ import { memo, useEffect, useMemo, useState } from 'react';
 import { Feature, useAppStore } from '@/store/app-store';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { AlertCircle, Lock, Hand, Sparkles, SkipForward } from 'lucide-react';
+import {
+  AlertCircle,
+  AlertTriangle,
+  Lock,
+  Hand,
+  Sparkles,
+  SkipForward,
+  FileCheck,
+} from 'lucide-react';
 import { getBlockingDependencies } from '@automaker/dependency-resolver';
 import { useShallow } from 'zustand/react/shallow';
 import { usePipelineConfig } from '@/hooks/queries/use-pipeline';
@@ -18,33 +26,61 @@ interface CardBadgesProps {
 
 /**
  * CardBadges - Shows error badges below the card header
- * Note: Blocked/Lock badges are now shown in PriorityBadges for visual consistency
+ * Note: Merge conflict badge is aligned with the top badge row for visual consistency
  */
 export const CardBadges = memo(function CardBadges({ feature }: CardBadgesProps) {
-  if (!feature.error) {
+  const showMergeConflict = feature.status === 'merge_conflict';
+  const mergeConflictOffsetClass = feature.priority ? 'left-9' : 'left-2';
+  if (!feature.error && !showMergeConflict) {
     return null;
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5 px-3 pt-1.5 min-h-[24px]">
+    <>
+      {/* Merge conflict badge */}
+      {showMergeConflict && (
+        <div className={cn('absolute top-2 z-10', mergeConflictOffsetClass)}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div
+                className={cn(
+                  uniformBadgeClass,
+                  'bg-[var(--status-warning-bg)] border-[var(--status-warning)]/40 text-[var(--status-warning)]'
+                )}
+                data-testid={`merge-conflict-badge-${feature.id}`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs max-w-[250px]">
+              <p>Merge Conflict: automatic merge failed and requires manual resolution</p>
+            </TooltipContent>
+          </Tooltip>
+        </div>
+      )}
+
       {/* Error badge */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <div
-            className={cn(
-              uniformBadgeClass,
-              'bg-[var(--status-error-bg)] border-[var(--status-error)]/40 text-[var(--status-error)]'
-            )}
-            data-testid={`error-badge-${feature.id}`}
-          >
-            <AlertCircle className="w-3.5 h-3.5" />
-          </div>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" className="text-xs max-w-[250px]">
-          <p>{feature.error}</p>
-        </TooltipContent>
-      </Tooltip>
-    </div>
+      {feature.error && (
+        <div className="flex flex-wrap items-center gap-1.5 px-3 pt-1.5 min-h-[24px]">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div
+                className={cn(
+                  uniformBadgeClass,
+                  'bg-[var(--status-error-bg)] border-[var(--status-error)]/40 text-[var(--status-error)]'
+                )}
+                data-testid={`error-badge-${feature.id}`}
+              >
+                <AlertCircle className="w-3.5 h-3.5" />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs max-w-[250px]">
+              <p>{feature.error}</p>
+            </TooltipContent>
+          </Tooltip>
+        </div>
+      )}
+    </>
   );
 });
 
@@ -119,12 +155,15 @@ export const PriorityBadges = memo(function PriorityBadges({
     excludedStepCount > 0 && totalPipelineSteps > 0 && feature.status === 'backlog';
   const allPipelinesExcluded = hasPipelineExclusions && excludedStepCount >= totalPipelineSteps;
 
+  const showPlanApproval = feature.planSpec?.status === 'generated';
+
   const showBadges =
     feature.priority ||
     showManualVerification ||
     isBlocked ||
     isJustFinished ||
-    hasPipelineExclusions;
+    hasPipelineExclusions ||
+    showPlanApproval;
 
   if (!showBadges) {
     return null;
@@ -232,6 +271,26 @@ export const PriorityBadges = memo(function PriorityBadges({
           </TooltipTrigger>
           <TooltipContent side="bottom" className="text-xs">
             <p>Agent just finished working on this feature</p>
+          </TooltipContent>
+        </Tooltip>
+      )}
+
+      {/* Plan approval badge */}
+      {showPlanApproval && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div
+              className={cn(
+                uniformBadgeClass,
+                'bg-purple-500/20 border-purple-500/50 text-purple-500 animate-pulse'
+              )}
+              data-testid={`plan-approval-badge-${feature.id}`}
+            >
+              <FileCheck className="w-3.5 h-3.5" />
+            </div>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs max-w-[250px]">
+            <p>Plan ready for review - click or tap to approve</p>
           </TooltipContent>
         </Tooltip>
       )}

@@ -12,6 +12,7 @@ import type {
   PRInfo,
   GitRepoStatus,
   TestSessionInfo,
+  MergeConflictInfo,
 } from '../types';
 import { BranchSwitchDropdown } from './branch-switch-dropdown';
 import { WorktreeActionsDropdown } from './worktree-actions-dropdown';
@@ -34,7 +35,8 @@ interface WorktreeTabProps {
   isSwitching: boolean;
   isPulling: boolean;
   isPushing: boolean;
-  isStartingDevServer: boolean;
+  isStartingAnyDevServer: boolean;
+  isDevServerStarting: boolean;
   aheadCount: number;
   behindCount: number;
   hasRemoteBranch: boolean;
@@ -94,6 +96,8 @@ interface WorktreeTabProps {
   onAbortOperation?: (worktree: WorktreeInfo) => void;
   /** Continue an in-progress merge/rebase/cherry-pick after resolving conflicts */
   onContinueOperation?: (worktree: WorktreeInfo) => void;
+  /** Create a feature to resolve merge/rebase/cherry-pick conflicts with AI */
+  onCreateConflictResolutionFeature?: (conflictInfo: MergeConflictInfo) => void;
   hasInitScript: boolean;
   /** Whether a test command is configured in project settings */
   hasTestCommand?: boolean;
@@ -146,7 +150,8 @@ export function WorktreeTab({
   isSwitching,
   isPulling,
   isPushing,
-  isStartingDevServer,
+  isStartingAnyDevServer,
+  isDevServerStarting,
   aheadCount,
   behindCount,
   hasRemoteBranch,
@@ -193,6 +198,7 @@ export function WorktreeTab({
   onCherryPick,
   onAbortOperation,
   onContinueOperation,
+  onCreateConflictResolutionFeature,
   hasInitScript,
   hasTestCommand = false,
   remotes,
@@ -531,7 +537,8 @@ export function WorktreeTab({
         trackingRemote={trackingRemote}
         isPulling={isPulling}
         isPushing={isPushing}
-        isStartingDevServer={isStartingDevServer}
+        isStartingAnyDevServer={isStartingAnyDevServer}
+        isDevServerStarting={isDevServerStarting}
         isDevServerRunning={isDevServerRunning}
         devServerInfo={devServerInfo}
         gitRepoStatus={gitRepoStatus}
@@ -576,6 +583,7 @@ export function WorktreeTab({
         onCherryPick={onCherryPick}
         onAbortOperation={onAbortOperation}
         onContinueOperation={onContinueOperation}
+        onCreateConflictResolutionFeature={onCreateConflictResolutionFeature}
         hasInitScript={hasInitScript}
         terminalScripts={terminalScripts}
         onRunTerminalScript={onRunTerminalScript}

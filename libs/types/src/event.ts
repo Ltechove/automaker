@@ -46,6 +46,7 @@ export type EventType =
   | 'worktree:init-started'
   | 'worktree:init-output'
   | 'worktree:init-completed'
+  | 'dev-server:starting'
   | 'dev-server:started'
   | 'dev-server:output'
   | 'dev-server:url-detected'
@@ -91,6 +92,8 @@ export type EventType =
   | 'switch:pop'
   | 'switch:done'
   | 'switch:error'
-  | 'notification:created';
+  | 'notification:created'
+  | 'worktree:deleted'
+  | 'feature:migrated';
 
 export type EventCallback = (type: EventType, payload: unknown) => void;

@@ -18,6 +18,7 @@ import type {
   ModelDefinition,
   ServerLogLevel,
   EventHook,
+  NtfyEndpointConfig,
   ClaudeApiProfile,
   ClaudeCompatibleProvider,
   SidebarStyle,
@@ -121,6 +122,10 @@ export interface AppState {
       maxConcurrency?: number; // Maximum concurrent features for this worktree (defaults to 3)
     }
   >;
+  // Features that recently completed (via auto_mode_feature_complete event)
+  // Used to prevent race condition where completed features briefly appear in backlog
+  // due to stale cache data. Cleared when features are refetched.
+  recentlyCompletedFeatures: Set<string>;
   autoModeActivityLog: AutoModeActivity[];
   maxConcurrency: number; // Legacy: Maximum number of concurrent agent tasks (deprecated, use per-worktree maxConcurrency)
 
@@ -163,6 +168,9 @@ export interface AppState {
 
   // Splash Screen Settings
   disableSplashScreen: boolean; // When true, skip showing the splash screen overlay on startup
+
+  // Board Card Sorting (global default)
+  defaultSortNewestCardOnTop: boolean; // Global default: sort latest card on top in board columns and list view
 
   // Server Log Level Settings
   serverLogLevel: ServerLogLevel; // Log level for the API server (error, warn, info, debug)
@@ -211,6 +219,7 @@ export interface AppState {
   // from `opencode models` CLI and depend on current provider authentication state
   dynamicOpencodeModels: ModelDefinition[]; // Dynamically discovered models from OpenCode CLI
   enabledDynamicModelIds: string[]; // Which dynamic models are enabled
+  knownDynamicModelIds: string[]; // All dynamic model IDs ever seen (used to avoid re-enabling explicitly deselected models)
   cachedOpencodeProviders: Array<{
     id: string;
     name: string;
@@ -266,6 +275,9 @@ export interface AppState {
 
   // Event Hooks
   eventHooks: EventHook[]; // Event hooks for custom commands or webhooks
+
+  // Ntfy.sh Notification Endpoints
+  ntfyEndpoints: NtfyEndpointConfig[]; // Configured ntfy.sh endpoints for push notifications
 
   // Feature Templates
   featureTemplates: FeatureTemplate[]; // Feature templates for quick task creation
@@ -508,6 +520,9 @@ export interface AppActions {
   getWorktreeKey: (projectId: string, branchName: string | null) => string;
   addAutoModeActivity: (activity: Omit<AutoModeActivity, 'id' | 'timestamp'>) => void;
   clearAutoModeActivity: () => void;
+  // Recently completed features - prevents race condition with stale cache
+  addRecentlyCompletedFeature: (featureId: string) => void;
+  clearRecentlyCompletedFeatures: () => void;
   setMaxConcurrency: (max: number) => void; // Legacy: kept for backward compatibility
   getMaxConcurrencyForWorktree: (projectId: string, branchName: string | null) => number;
   setMaxConcurrencyForWorktree: (
@@ -567,6 +582,9 @@ export interface AppActions {
   // Splash Screen actions
   setDisableSplashScreen: (disabled: boolean) => void;
 
+  // Board Card Sorting (global default) actions
+  setDefaultSortNewestCardOnTop: (enabled: boolean) => void;
+
   // Server Log Level actions
   setServerLogLevel: (level: ServerLogLevel) => void;
   setEnableRequestLogging: (enabled: boolean) => void;
@@ -609,12 +627,16 @@ export interface AppActions {
   setCodexEnableImages: (enabled: boolean) => Promise<void>;
 
   // OpenCode CLI Settings actions
+  // Note: setOpencodeDefaultModel, toggleOpencodeModel, setEnabledDynamicModelIds, and
+  // toggleDynamicModel return Promise<void> because they persist state to the server.
+  // TODO: harmonize other provider action types (e.g., setCursorDefaultModel, toggleCursorModel,
+  // setGeminiDefaultModel) to also return Promise<void> for consistent async persistence.
   setEnabledOpencodeModels: (models: OpencodeModelId[]) => void;
-  setOpencodeDefaultModel: (model: OpencodeModelId) => void;
-  toggleOpencodeModel: (model: OpencodeModelId, enabled: boolean) => void;
+  setOpencodeDefaultModel: (model: OpencodeModelId) => Promise<void>;
+  toggleOpencodeModel: (model: OpencodeModelId, enabled: boolean) => Promise<void>;
   setDynamicOpencodeModels: (models: ModelDefinition[]) => void;
-  setEnabledDynamicModelIds: (ids: string[]) => void;
-  toggleDynamicModel: (modelId: string, enabled: boolean) => void;
+  setEnabledDynamicModelIds: (ids: string[]) => Promise<void>;
+  toggleDynamicModel: (modelId: string, enabled: boolean) => Promise<void>;
   setCachedOpencodeProviders: (
     providers: Array<{ id: string; name: string; authenticated: boolean; authMethod?: string }>
   ) => void;
@@ -656,6 +678,9 @@ export interface AppActions {
 
   // Event Hook actions
   setEventHooks: (hooks: EventHook[]) => Promise<void>;
+
+  // Ntfy Endpoint actions
+  setNtfyEndpoints: (endpoints: NtfyEndpointConfig[]) => Promise<void>;
 
   // Feature Template actions
   setFeatureTemplates: (templates: FeatureTemplate[]) => Promise<void>;

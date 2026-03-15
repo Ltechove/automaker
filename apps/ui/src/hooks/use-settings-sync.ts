@@ -37,6 +37,7 @@ import {
   type CursorModelId,
   type GeminiModelId,
   type CopilotModelId,
+  type PhaseModelEntry,
 } from '@automaker/types';
 
 const logger = createLogger('SettingsSync');
@@ -69,6 +70,7 @@ const SETTINGS_FIELDS_TO_SYNC = [
   'defaultFeatureModel',
   'muteDoneSound',
   'disableSplashScreen',
+  'defaultSortNewestCardOnTop',
   'serverLogLevel',
   'enableRequestLogging',
   'showQueryDevtools',
@@ -86,6 +88,7 @@ const SETTINGS_FIELDS_TO_SYNC = [
   'enabledCopilotModels',
   'copilotDefaultModel',
   'enabledDynamicModelIds',
+  'knownDynamicModelIds',
   'disabledProviders',
   'autoLoadClaudeMd',
   'useClaudeCodeSystemPrompt',
@@ -104,8 +107,9 @@ const SETTINGS_FIELDS_TO_SYNC = [
   'subagentsSources',
   'promptCustomization',
   'eventHooks',
+  'ntfyEndpoints',
   'featureTemplates',
-  'claudeCompatibleProviders',
+  'claudeCompatibleProviders', // Claude-compatible provider configs - must persist to server
   'claudeApiProfiles',
   'activeClaudeApiProfileId',
   'projects',
@@ -450,6 +454,7 @@ export function useSettingsSync(): SettingsSyncState {
     }
 
     initializeSync();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- state.loaded is intentionally excluded to prevent infinite loop
   }, [authChecked, isAuthenticated, settingsLoaded]);
 
   // Subscribe to store changes and sync to server
@@ -477,6 +482,14 @@ export function useSettingsSync(): SettingsSyncState {
       // If the current project changed, sync immediately so we can restore on next launch
       if (newState.currentProject?.id !== prevState.currentProject?.id) {
         logger.debug('Current project changed, syncing immediately');
+        syncNow();
+        return;
+      }
+
+      // If the sort preference changed, sync immediately so it survives a page refresh
+      // before the debounce timer fires (1s debounce would be lost on quick refresh).
+      if (newState.defaultSortNewestCardOnTop !== prevState.defaultSortNewestCardOnTop) {
+        logger.debug('defaultSortNewestCardOnTop changed, syncing immediately');
         syncNow();
         return;
       }
@@ -704,6 +717,12 @@ export async function refreshSettingsFromServer(): Promise<boolean> {
       (modelId) => !modelId.startsWith('amazon-bedrock/')
     );
 
+    const persistedKnownDynamicModelIds =
+      serverSettings.knownDynamicModelIds ?? currentAppState.knownDynamicModelIds;
+    const sanitizedKnownDynamicModelIds = persistedKnownDynamicModelIds.filter(
+      (modelId) => !modelId.startsWith('amazon-bedrock/')
+    );
+
     // Migrate phase models to canonical format
     const migratedPhaseModels = serverSettings.phaseModels
       ? {
@@ -787,6 +806,7 @@ export async function refreshSettingsFromServer(): Promise<boolean> {
       muteDoneSound: serverSettings.muteDoneSound,
       defaultMaxTurns: serverSettings.defaultMaxTurns ?? 10000,
       disableSplashScreen: serverSettings.disableSplashScreen ?? false,
+      defaultSortNewestCardOnTop: serverSettings.defaultSortNewestCardOnTop ?? false,
       serverLogLevel: serverSettings.serverLogLevel ?? 'info',
       enableRequestLogging: serverSettings.enableRequestLogging ?? true,
       enhancementModel: serverSettings.enhancementModel,
@@ -806,6 +826,7 @@ export async function refreshSettingsFromServer(): Promise<boolean> {
       enabledCopilotModels: sanitizedEnabledCopilotModels,
       copilotDefaultModel: sanitizedCopilotDefaultModel,
       enabledDynamicModelIds: sanitizedDynamicModelIds,
+      knownDynamicModelIds: sanitizedKnownDynamicModelIds,
       disabledProviders: serverSettings.disabledProviders ?? [],
       autoLoadClaudeMd: serverSettings.autoLoadClaudeMd ?? true,
       useClaudeCodeSystemPrompt: serverSettings.useClaudeCodeSystemPrompt ?? true,
@@ -823,6 +844,9 @@ export async function refreshSettingsFromServer(): Promise<boolean> {
       editorAutoSaveDelay: serverSettings.editorAutoSaveDelay ?? 1000,
       defaultTerminalId: serverSettings.defaultTerminalId ?? null,
       promptCustomization: serverSettings.promptCustomization ?? {},
+      // Claude-compatible providers - must be loaded from server for persistence
+      claudeCompatibleProviders: serverSettings.claudeCompatibleProviders ?? [],
+      // Deprecated Claude API profiles (kept for migration)
       claudeApiProfiles: serverSettings.claudeApiProfiles ?? [],
       activeClaudeApiProfileId: serverSettings.activeClaudeApiProfileId ?? null,
       projects: serverSettings.projects,
@@ -833,12 +857,15 @@ export async function refreshSettingsFromServer(): Promise<boolean> {
       agentModelBySession: serverSettings.agentModelBySession
         ? Object.fromEntries(
             Object.entries(serverSettings.agentModelBySession as Record<string, unknown>).map(
-              ([sessionId, entry]) => [sessionId, migratePhaseModelEntry(entry)]
+              ([sessionId, entry]) => [
+                sessionId,
+                migratePhaseModelEntry(entry as string | PhaseModelEntry | null | undefined),
+              ]
             )
           )
         : currentAppState.agentModelBySession,
-      // Sanitize: only restore entries with path === null (main branch).
-      // Non-null paths may reference deleted worktrees, causing crash loops.
+      // Restore all valid worktree selections (both main branch and feature worktrees).
+      // The validation effect in use-worktrees.ts handles deleted worktrees gracefully.
       currentWorktreeByProject: sanitizeWorktreeByProject(
         serverSettings.currentWorktreeByProject ?? currentAppState.currentWorktreeByProject
       ),
@@ -848,6 +875,8 @@ export async function refreshSettingsFromServer(): Promise<boolean> {
       recentFolders: serverSettings.recentFolders ?? [],
       // Event hooks
       eventHooks: serverSettings.eventHooks ?? [],
+      // Ntfy endpoints
+      ntfyEndpoints: serverSettings.ntfyEndpoints ?? [],
       // Feature templates
       featureTemplates: serverSettings.featureTemplates ?? [],
       // Codex CLI Settings

@@ -101,12 +101,32 @@ export function detectTaskStartMarker(text: string): string | null {
 }
 
 /**
- * Detect [TASK_COMPLETE] marker in text and extract task ID
+ * Detect [TASK_COMPLETE] marker in text and extract task ID and summary
  * Format: [TASK_COMPLETE] T###: Brief summary
  */
-export function detectTaskCompleteMarker(text: string): string | null {
-  const match = text.match(/\[TASK_COMPLETE\]\s*(T\d{3})/);
-  return match ? match[1] : null;
+export function detectTaskCompleteMarker(text: string): { id: string; summary?: string } | null {
+  // Use a regex that captures the summary until newline or next task marker
+  // Allow brackets in summary content (e.g., "supports array[index] access")
+  // Pattern breakdown:
+  // - \[TASK_COMPLETE\]\s* - Match the marker
+  // - (T\d{3}) - Capture task ID
+  // - (?::\s*([^\n\[]+))? - Optionally capture summary (stops at newline or bracket)
+  // - But we want to allow brackets in summary, so we use a different approach:
+  // - Match summary until newline, then trim any trailing markers in post-processing
+  const match = text.match(/\[TASK_COMPLETE\]\s*(T\d{3})(?::\s*(.+?))?(?=\n|$)/i);
+  if (!match) return null;
+
+  // Post-process: remove trailing task markers from summary if present
+  let summary = match[2]?.trim();
+  if (summary) {
+    // Remove trailing content that looks like another marker
+    summary = summary.replace(/\s*\[TASK_[A-Z_]+\].*$/i, '').trim();
+  }
+
+  return {
+    id: match[1],
+    summary: summary || undefined,
+  };
 }
 
 /**
@@ -194,10 +214,14 @@ export function extractSummary(text: string): string | null {
   }
 
   // Check for ## Summary section (use last match)
-  const sectionMatches = text.matchAll(/##\s*Summary\s*\n+([\s\S]*?)(?=\n##|\n\*\*|$)/gi);
+  // Stop at \n## [^#] (same-level headers like "## Changes") but preserve ### subsections
+  // (like "### Root Cause", "### Fix Applied") that belong to the summary content.
+  const sectionMatches = text.matchAll(/##\s*Summary\s*\n+([\s\S]*?)(?=\n## [^#]|$)/gi);
   const sectionMatch = getLastMatch(sectionMatches);
   if (sectionMatch) {
-    return truncate(sectionMatch[1].trim(), 500);
+    const content = sectionMatch[1].trim();
+    // Keep full content (including ### subsections) up to max length
+    return content.length > 500 ? `${content.substring(0, 500)}...` : content;
   }
 
   // Check for **Goal**: section (lite mode, use last match)

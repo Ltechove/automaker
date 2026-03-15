@@ -238,14 +238,36 @@ export default defineConfig(({ command }) => {
       // Inject build hash into sw.js CACHE_NAME for automatic cache busting
       swCacheBuster(),
     ],
+    // Keep Vite dep-optimization cache local to apps/ui so each worktree gets
+    // its own pre-bundled dependencies. Shared cache state across worktrees can
+    // produce duplicate React instances (notably with @xyflow/react) and trigger
+    // "Invalid hook call" in the graph view.
+    cacheDir: path.resolve(__dirname, 'node_modules/.vite'),
     resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-      // Deduplicate React to prevent "Cannot read properties of null (reading 'useState')"
-      // errors caused by CJS packages (like use-sync-external-store used by zustand@4 inside
-      // @xyflow/react) resolving React to a different instance than the pre-bundled ESM React.
-      dedupe: ['react', 'react-dom'],
+      alias: [
+        { find: '@', replacement: path.resolve(__dirname, './src') },
+        // Force ALL React imports (including from nested deps like zustand@4 inside
+        // @xyflow/react) to resolve to a single copy.
+        // Explicit subpath aliases must come BEFORE the broad regex so Vite's
+        // first-match-wins resolution applies the specific match first.
+        {
+          find: /^react-dom(\/|$)/,
+          replacement: path.resolve(__dirname, '../../node_modules/react-dom') + '/',
+        },
+        {
+          find: 'react/jsx-runtime',
+          replacement: path.resolve(__dirname, '../../node_modules/react/jsx-runtime.js'),
+        },
+        {
+          find: 'react/jsx-dev-runtime',
+          replacement: path.resolve(__dirname, '../../node_modules/react/jsx-dev-runtime.js'),
+        },
+        {
+          find: /^react(\/|$)/,
+          replacement: path.resolve(__dirname, '../../node_modules/react') + '/',
+        },
+      ],
+      dedupe: ['react', 'react-dom', 'zustand', 'use-sync-external-store', '@xyflow/react'],
     },
     server: {
       host: process.env.HOST || '0.0.0.0',
@@ -338,11 +360,21 @@ export default defineConfig(({ command }) => {
     },
     optimizeDeps: {
       exclude: ['@automaker/platform'],
-      // Ensure CJS packages that use require('react') are pre-bundled together with React
-      // so that the CJS interop resolves to the same React instance as the rest of the app.
-      // Without this, use-sync-external-store (used by zustand@4 inside @xyflow/react) may
-      // get a null React reference, causing "Cannot read properties of null (reading 'useState')".
-      include: ['react', 'react-dom', 'use-sync-external-store'],
+      // Pre-bundle CJS packages that use require('react') so the CJS interop resolves to
+      // the same React instance as the rest of the app. The nested zustand@4 inside
+      // @xyflow/react uses use-sync-external-store/shim/with-selector which does
+      // require('react') — both the base and subpath must be included here.
+      include: [
+        'react',
+        'react-dom',
+        'react/jsx-runtime',
+        'react/jsx-dev-runtime',
+        'use-sync-external-store',
+        'use-sync-external-store/shim',
+        'use-sync-external-store/shim/with-selector',
+        'zustand',
+        '@xyflow/react',
+      ],
     },
     define: {
       __APP_VERSION__: JSON.stringify(appVersion),

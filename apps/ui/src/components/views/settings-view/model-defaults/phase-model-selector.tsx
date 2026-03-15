@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
+import { useShallow } from 'zustand/react/shallow';
 import { useIsMobile } from '@/hooks/use-media-query';
 import { useOpencodeModels } from '@/hooks/queries';
 import type {
@@ -176,6 +177,7 @@ export function PhaseModelSelector({
     enabledCursorModels,
     enabledGeminiModels,
     enabledCopilotModels,
+    enabledOpencodeModels,
     favoriteModels,
     toggleFavoriteModel,
     codexModels,
@@ -186,7 +188,24 @@ export function PhaseModelSelector({
     claudeCompatibleProviders,
     defaultThinkingLevel: storeDefaultThinkingLevel,
     defaultReasoningEffort: storeDefaultReasoningEffort,
-  } = useAppStore();
+  } = useAppStore(
+    useShallow((state) => ({
+      enabledCursorModels: state.enabledCursorModels,
+      enabledGeminiModels: state.enabledGeminiModels,
+      enabledCopilotModels: state.enabledCopilotModels,
+      enabledOpencodeModels: state.enabledOpencodeModels,
+      favoriteModels: state.favoriteModels,
+      toggleFavoriteModel: state.toggleFavoriteModel,
+      codexModels: state.codexModels,
+      codexModelsLoading: state.codexModelsLoading,
+      fetchCodexModels: state.fetchCodexModels,
+      enabledDynamicModelIds: state.enabledDynamicModelIds,
+      disabledProviders: state.disabledProviders,
+      claudeCompatibleProviders: state.claudeCompatibleProviders,
+      defaultThinkingLevel: state.defaultThinkingLevel,
+      defaultReasoningEffort: state.defaultReasoningEffort,
+    }))
+  );
 
   // Use React Query for OpenCode models so that changes made in the settings tab
   // (which also uses React Query) are immediately reflected here via the shared cache,
@@ -548,8 +567,10 @@ export function PhaseModelSelector({
 
   // Combine static and dynamic OpenCode models
   const allOpencodeModels: ModelOption[] = useMemo(() => {
-    // Start with static models
-    const staticModels = [...OPENCODE_MODELS];
+    // Filter static models by what the user has enabled in Settings → AI Providers
+    const staticModels = OPENCODE_MODELS.filter((model) =>
+      (enabledOpencodeModels as string[]).includes(model.id)
+    );
 
     // Add dynamic models (convert ModelDefinition to ModelOption)
     // Only include dynamic models that are enabled by the user
@@ -559,17 +580,25 @@ export function PhaseModelSelector({
         id: model.id,
         label: model.name,
         description: model.description,
-        badge: model.tier === 'premium' ? 'Premium' : model.tier === 'basic' ? 'Free' : undefined,
+        badge: model.tier === 'premium' ? 'Premium' : undefined,
         provider: 'opencode' as const,
       }));
 
-    // Merge, avoiding duplicates (static models take precedence for same ID)
-    // In practice, static and dynamic IDs don't overlap
-    const staticIds = new Set(staticModels.map((m) => m.id));
-    const uniqueDynamic = dynamicModelOptions.filter((m) => !staticIds.has(m.id));
+    // Merge, avoiding duplicates (static models take precedence)
+    // Static IDs use dash format (opencode-glm-5-free), dynamic use slash format (opencode/glm-5-free)
+    // Normalize both to the model name part for comparison
+    const normalizeModelName = (id: string): string => {
+      if (id.startsWith('opencode-')) return id.slice('opencode-'.length);
+      if (id.startsWith('opencode/')) return id.slice('opencode/'.length);
+      return id;
+    };
+    const staticModelNames = new Set(staticModels.map((m) => normalizeModelName(m.id)));
+    const uniqueDynamic = dynamicModelOptions.filter(
+      (m) => !staticModelNames.has(normalizeModelName(m.id))
+    );
 
     return [...staticModels, ...uniqueDynamic];
-  }, [dynamicOpencodeModels, enabledDynamicModelIds]);
+  }, [enabledOpencodeModels, dynamicOpencodeModels, enabledDynamicModelIds]);
 
   // Check if providers are disabled (needed for rendering conditions)
   const isCursorDisabled = disabledProviders.includes('cursor');
@@ -674,6 +703,7 @@ export function PhaseModelSelector({
     transformedCodexModels,
     allOpencodeModels,
     disabledProviders,
+    isCursorDisabled,
   ]);
 
   // Group OpenCode models by model type for better organization

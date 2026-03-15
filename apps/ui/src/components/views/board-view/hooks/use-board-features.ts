@@ -32,11 +32,7 @@ export function useBoardFeatures({ currentProject }: UseBoardFeaturesProps) {
   const isRestoring = useIsRestoring();
 
   // Use React Query for features
-  const {
-    data: features = [],
-    isLoading: isQueryLoading,
-    refetch: loadFeatures,
-  } = useFeatures(currentProject?.path);
+  const { data: features = [], isLoading: isQueryLoading } = useFeatures(currentProject?.path);
 
   // Don't report loading while IDB cache restore is in progress —
   // features will appear momentarily once the restore completes.
@@ -61,7 +57,7 @@ export function useBoardFeatures({ currentProject }: UseBoardFeaturesProps) {
     } catch {
       setPersistedCategories([]);
     }
-  }, [currentProject, loadFeatures]);
+  }, [currentProject]);
 
   // Save a new category to the persisted categories file
   const saveCategory = useCallback(
@@ -91,40 +87,23 @@ export function useBoardFeatures({ currentProject }: UseBoardFeaturesProps) {
   );
 
   // Subscribe to auto mode events for notifications (ding sound, toasts)
-  // Note: Query invalidation is handled by useAutoModeQueryInvalidation in the root
+  // Note: Query invalidation is handled by useAutoModeQueryInvalidation in the root.
+  // Note: removeRunningTask is handled by useAutoMode — do NOT duplicate it here,
+  // as duplicate Zustand mutations cause re-render cascades (React error #185).
   useEffect(() => {
     const api = getElectronAPI();
     if (!api?.autoMode || !currentProject) return;
 
-    const { removeRunningTask } = useAppStore.getState();
-    const projectId = currentProject.id;
     const projectPath = currentProject.path;
 
     const unsubscribe = api.autoMode.onEvent((event) => {
       // Check if event is for the current project by matching projectPath
       const eventProjectPath = ('projectPath' in event && event.projectPath) as string | undefined;
       if (eventProjectPath && eventProjectPath !== projectPath) {
-        // Event is for a different project, ignore it
-        logger.debug(
-          `Ignoring auto mode event for different project: ${eventProjectPath} (current: ${projectPath})`
-        );
         return;
       }
 
-      // Use event's projectPath or projectId if available, otherwise use current project
-      // Board view only reacts to events for the currently selected project
-      const eventProjectId = ('projectId' in event && event.projectId) || projectId;
-
-      if (event.type === 'auto_mode_feature_start') {
-        // Reload features when a feature starts to ensure status update (backlog -> in_progress) is reflected
-        logger.info(
-          `[BoardFeatures] Feature ${event.featureId} started for project ${projectPath}, reloading features to update status...`
-        );
-        loadFeatures();
-      } else if (event.type === 'auto_mode_feature_complete') {
-        // Reload features when a feature is completed
-        logger.info('Feature completed, reloading features...');
-        loadFeatures();
+      if (event.type === 'auto_mode_feature_complete') {
         // Play ding sound when feature is done (unless muted)
         const { muteDoneSound } = useAppStore.getState();
         if (!muteDoneSound) {
@@ -132,14 +111,7 @@ export function useBoardFeatures({ currentProject }: UseBoardFeaturesProps) {
           audio.play().catch((err) => logger.warn('Could not play ding sound:', err));
         }
       } else if (event.type === 'auto_mode_error') {
-        // Remove from running tasks
-        if (event.featureId) {
-          const eventBranchName =
-            'branchName' in event && event.branchName !== undefined ? event.branchName : null;
-          removeRunningTask(eventProjectId, eventBranchName, event.featureId);
-        }
-
-        // Show error toast
+        // Show error toast (removeRunningTask is handled by useAutoMode, not here)
         const isAuthError =
           event.errorType === 'authentication' ||
           (event.error &&

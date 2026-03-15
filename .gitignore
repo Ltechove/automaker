@@ -65,6 +65,17 @@ coverage/
 *.lcov
 playwright-report/
 blob-report/
+test/**/test-project-[0-9]*/
+test/opus-thinking-*/
+test/agent-session-test-*/
+test/feature-backlog-test-*/
+test/running-task-display-test-*/
+test/agent-output-modal-responsive-*/
+test/fixtures/
+test/board-bg-test-*/
+test/edit-feature-test-*/
+test/open-project-test-*/
+
 
 # Environment files (keep .example)
 .env
@@ -102,3 +113,4 @@ data/
 .planning/
 .mcp.json
 .planning
+.bg-shell/

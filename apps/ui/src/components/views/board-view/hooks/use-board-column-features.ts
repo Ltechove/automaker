@@ -1,5 +1,5 @@
 // @ts-nocheck - column filtering logic with dependency resolution and status mapping
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useEffect } from 'react';
 import { Feature, useAppStore } from '@/store/app-store';
 import {
   createFeatureMap,
@@ -9,6 +9,147 @@ import {
 
 type ColumnId = Feature['status'];
 
+/**
+ * Extract creation time from a feature, falling back to the timestamp
+ * embedded in the feature ID (format: feature-{timestamp}-{random}).
+ */
+function getFeatureCreatedTime(feature: Feature): number {
+  if (feature.createdAt) {
+    return new Date(feature.createdAt).getTime();
+  }
+  // Fallback: extract timestamp from feature ID (e.g., "feature-1772299989679-185nwyp5kc7")
+  const match = feature.id.match(/^feature-(\d+)-/);
+  if (match) {
+    return parseInt(match[1], 10);
+  }
+  return 0;
+}
+
+/**
+ * Sort features newest-first while respecting dependency ordering.
+ *
+ * Groups features into dependency chains and sorts the chains by the newest
+ * feature in each chain (descending). Within each chain, dependencies appear
+ * before their dependents (topological order preserved).
+ *
+ * Features without any dependency relationships are treated as single-item chains
+ * and sorted by their own creation time.
+ */
+function sortNewestWithDependencies(features: Feature[]): Feature[] {
+  if (features.length <= 1) return features;
+
+  const featureMap = new Map(features.map((f) => [f.id, f]));
+  const featureSet = new Set(features.map((f) => f.id));
+
+  // Build adjacency: parent -> children (dependency -> dependents) scoped to this list
+  const childrenOf = new Map<string, string[]>();
+  const parentOf = new Map<string, string[]>();
+  for (const f of features) {
+    childrenOf.set(f.id, []);
+    parentOf.set(f.id, []);
+  }
+  for (const f of features) {
+    for (const depId of f.dependencies || []) {
+      if (featureSet.has(depId)) {
+        childrenOf.get(depId)!.push(f.id);
+        parentOf.get(f.id)!.push(depId);
+      }
+    }
+  }
+
+  // Find connected components (dependency chains/groups)
+  const visited = new Set<string>();
+  const components: string[][] = [];
+
+  function collectComponent(startId: string): string[] {
+    const component: string[] = [];
+    const stack = [startId];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      component.push(id);
+      // Traverse both directions to find full connected component
+      for (const childId of childrenOf.get(id) || []) {
+        if (!visited.has(childId)) stack.push(childId);
+      }
+      for (const pid of parentOf.get(id) || []) {
+        if (!visited.has(pid)) stack.push(pid);
+      }
+    }
+    return component;
+  }
+
+  for (const f of features) {
+    if (!visited.has(f.id)) {
+      components.push(collectComponent(f.id));
+    }
+  }
+
+  // For each component, find the newest feature time (used to sort components)
+  // and produce a topological ordering within the component
+  const sortedComponents: { newestTime: number; ordered: Feature[] }[] = [];
+
+  for (const component of components) {
+    let newestTime = 0;
+    for (const id of component) {
+      const t = getFeatureCreatedTime(featureMap.get(id)!);
+      if (t > newestTime) newestTime = t;
+    }
+
+    // Topological sort within component (dependencies first)
+    // Use the existing order from `features` as a stable fallback
+    const componentSet = new Set(component);
+    const inDegree = new Map<string, number>();
+    for (const id of component) {
+      let deg = 0;
+      for (const pid of parentOf.get(id) || []) {
+        if (componentSet.has(pid)) deg++;
+      }
+      inDegree.set(id, deg);
+    }
+
+    const queue: Feature[] = [];
+    for (const id of component) {
+      if (inDegree.get(id) === 0) {
+        queue.push(featureMap.get(id)!);
+      }
+    }
+    // Within same level, sort newest first
+    queue.sort((a, b) => getFeatureCreatedTime(b) - getFeatureCreatedTime(a));
+
+    const ordered: Feature[] = [];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      ordered.push(current);
+      for (const childId of childrenOf.get(current.id) || []) {
+        if (!componentSet.has(childId)) continue;
+        const newDeg = (inDegree.get(childId) || 1) - 1;
+        inDegree.set(childId, newDeg);
+        if (newDeg === 0) {
+          queue.push(featureMap.get(childId)!);
+          queue.sort((a, b) => getFeatureCreatedTime(b) - getFeatureCreatedTime(a));
+        }
+      }
+    }
+
+    // Append any remaining (circular deps) at end
+    for (const id of component) {
+      if (!ordered.some((f) => f.id === id)) {
+        ordered.push(featureMap.get(id)!);
+      }
+    }
+
+    sortedComponents.push({ newestTime, ordered });
+  }
+
+  // Sort components by newest feature time (descending)
+  sortedComponents.sort((a, b) => b.newestTime - a.newestTime);
+
+  // Flatten: each component's internal order is preserved
+  return sortedComponents.flatMap((c) => c.ordered);
+}
+
 interface UseBoardColumnFeaturesProps {
   features: Feature[];
   runningAutoTasks: string[];
@@ -17,6 +158,7 @@ interface UseBoardColumnFeaturesProps {
   currentWorktreePath: string | null; // Currently selected worktree path
   currentWorktreeBranch: string | null; // Branch name of the selected worktree (null = main)
   projectPath: string | null; // Main project path (for main worktree)
+  sortNewestCardOnTop?: boolean; // When true, sort cards by most recent (createdAt desc) in all columns
 }
 
 export function useBoardColumnFeatures({
@@ -27,7 +169,46 @@ export function useBoardColumnFeatures({
   currentWorktreePath,
   currentWorktreeBranch,
   projectPath,
+  sortNewestCardOnTop = false,
 }: UseBoardColumnFeaturesProps) {
+  // Get recently completed features from store for race condition protection
+  const recentlyCompletedFeatures = useAppStore((state) => state.recentlyCompletedFeatures);
+  const clearRecentlyCompletedFeatures = useAppStore(
+    (state) => state.clearRecentlyCompletedFeatures
+  );
+
+  // Clear recently completed features when the cache refreshes with updated statuses.
+  //
+  // RACE CONDITION SCENARIO THIS PREVENTS:
+  // 1. Feature completes on server -> status becomes 'verified'/'completed' on disk
+  // 2. Server emits auto_mode_feature_complete event
+  // 3. Frontend receives event -> removes feature from runningTasks, adds to recentlyCompletedFeatures
+  // 4. React Query invalidates features query, triggers async refetch
+  // 5. RACE: Before refetch completes, component may re-render with stale cache data
+  //    where status='backlog' and feature is no longer in runningTasks
+  // 6. This hook prevents the feature from appearing in backlog during that window
+  //
+  // When the refetch completes with fresh data (status='verified'/'completed'),
+  // this effect clears the recentlyCompletedFeatures set since it's no longer needed.
+  // Clear recently completed features when the cache refreshes with updated statuses.
+  // IMPORTANT: Only depend on `features` (not `recentlyCompletedFeatures`) to avoid a
+  // re-trigger loop where clearing the set creates a new reference that re-fires this effect.
+  // Read recentlyCompletedFeatures from the store directly to get the latest value without
+  // subscribing to it as a dependency.
+  useEffect(() => {
+    const currentRecentlyCompleted = useAppStore.getState().recentlyCompletedFeatures;
+    if (currentRecentlyCompleted.size === 0) return;
+
+    const hasUpdatedStatus = Array.from(currentRecentlyCompleted).some((featureId) => {
+      const feature = features.find((f) => f.id === featureId);
+      return feature && (feature.status === 'verified' || feature.status === 'completed');
+    });
+
+    if (hasUpdatedStatus) {
+      clearRecentlyCompletedFeatures();
+    }
+  }, [features, clearRecentlyCompletedFeatures]);
+
   // Memoize column features to prevent unnecessary re-renders
   const columnFeaturesMap = useMemo(() => {
     // Use a more flexible type to support dynamic pipeline statuses
@@ -44,6 +225,9 @@ export function useBoardColumnFeatures({
     // briefly appearing in backlog during the timing gap between when the server
     // starts executing a feature and when the UI receives the event/status update.
     const allRunningTaskIds = new Set(runningAutoTasksAllWorktrees);
+    // Get recently completed features for additional race condition protection
+    // These features should not appear in backlog even if cache has stale status
+    const recentlyCompleted = recentlyCompletedFeatures;
 
     // Filter features by search query (case-insensitive)
     const normalizedQuery = searchQuery.toLowerCase().trim();
@@ -148,12 +332,19 @@ export function useBoardColumnFeatures({
       // Filter all items by worktree, including backlog
       // This ensures backlog items with a branch assigned only show in that branch
       //
-      // 'ready' and 'interrupted' are transitional statuses that don't have dedicated columns:
+      // 'merge_conflict', 'ready', and 'interrupted' are backlog-lane statuses that don't
+      // have dedicated columns:
+      // - 'merge_conflict': Automatic merge failed; user must resolve conflicts before restart
       // - 'ready': Feature has an approved plan, waiting to be picked up for execution
       // - 'interrupted': Feature execution was aborted (e.g., user stopped it, server restart)
       // Both display in the backlog column and need the same allRunningTaskIds race-condition
       // protection as 'backlog' to prevent briefly flashing in backlog when already executing.
-      if (status === 'backlog' || status === 'ready' || status === 'interrupted') {
+      if (
+        status === 'backlog' ||
+        status === 'merge_conflict' ||
+        status === 'ready' ||
+        status === 'interrupted'
+      ) {
         // IMPORTANT: Check if this feature is running on ANY worktree before placing in backlog.
         // This prevents a race condition where the feature has started executing on the server
         // (and is tracked in a different worktree's running list) but the disk status hasn't
@@ -165,6 +356,14 @@ export function useBoardColumnFeatures({
           if (matchesWorktree) {
             map.in_progress.push(f);
           }
+        } else if (recentlyCompleted.has(f.id)) {
+          // Feature recently completed - skip placing in backlog to prevent race condition
+          // where stale cache has status='backlog' but feature actually completed.
+          // The feature will be placed correctly once the cache refreshes.
+          // Log for debugging (can remove after verification)
+          console.debug(
+            `Feature ${f.id} recently completed - skipping backlog placement during cache refresh`
+          );
         } else if (matchesWorktree) {
           map.backlog.push(f);
         }
@@ -216,9 +415,34 @@ export function useBoardColumnFeatures({
           }
         }
 
-        map.backlog = [...unblocked, ...blocked];
+        if (sortNewestCardOnTop) {
+          // Sort each group newest-first while keeping dependency chains nested
+          map.backlog = [
+            ...sortNewestWithDependencies(unblocked),
+            ...sortNewestWithDependencies(blocked),
+          ];
+        } else {
+          map.backlog = [...unblocked, ...blocked];
+        }
       } else {
-        map.backlog = orderedFeatures;
+        if (sortNewestCardOnTop) {
+          map.backlog = sortNewestWithDependencies(orderedFeatures);
+        } else {
+          map.backlog = orderedFeatures;
+        }
+      }
+    }
+
+    // Apply newest-on-top sorting to non-backlog columns when enabled
+    // (Backlog is handled above with dependency-aware sorting)
+    if (sortNewestCardOnTop) {
+      for (const columnId of Object.keys(map)) {
+        if (columnId === 'backlog') continue;
+        map[columnId] = [...map[columnId]].sort((a, b) => {
+          const aTime = getFeatureCreatedTime(a);
+          const bTime = getFeatureCreatedTime(b);
+          return bTime - aTime; // desc: newest first
+        });
       }
     }
 
@@ -231,6 +455,8 @@ export function useBoardColumnFeatures({
     currentWorktreePath,
     currentWorktreeBranch,
     projectPath,
+    recentlyCompletedFeatures,
+    sortNewestCardOnTop,
   ]);
 
   const getColumnFeatures = useCallback(

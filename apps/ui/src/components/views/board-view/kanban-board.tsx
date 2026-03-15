@@ -1,4 +1,5 @@
 import {
+  memo,
   useMemo,
   useRef,
   useState,
@@ -161,6 +162,7 @@ function VirtualizedList<Item extends VirtualListItem>({
       const resolvedHeight = measured ?? estimatedItemHeight;
       return resolvedHeight + itemGap;
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, estimatedItemHeight, itemGap, measureVersion]);
 
   const itemStarts = useMemo(() => {
@@ -279,7 +281,11 @@ function VirtualizedList<Item extends VirtualListItem>({
   );
 }
 
-export function KanbanBoard({
+// Stable empty Set to use as default prop value. Using `new Set()` inline in
+// the destructuring creates a new reference on every render, defeating memo.
+const EMPTY_FEATURE_IDS = new Set<string>();
+
+export const KanbanBoard = memo(function KanbanBoard({
   activeFeature,
   getColumnFeatures,
   backgroundImageStyle,
@@ -315,7 +321,7 @@ export function KanbanBoard({
   onOpenPipelineSettings,
   isSelectionMode = false,
   selectionTarget = null,
-  selectedFeatureIds = new Set(),
+  selectedFeatureIds = EMPTY_FEATURE_IDS,
   onToggleFeatureSelection,
   onToggleSelectionMode,
   onAiSuggest,
@@ -718,4 +724,4 @@ export function KanbanBoard({
       </DragOverlay>
     </div>
   );
-}
+});

@@ -15,7 +15,12 @@ import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import type { Feature, PlanningMode, ThinkingLevel, ReasoningEffort } from '@automaker/types';
-import { DEFAULT_MAX_CONCURRENCY, DEFAULT_MODELS, stripProviderPrefix } from '@automaker/types';
+import {
+  DEFAULT_MAX_CONCURRENCY,
+  DEFAULT_MODELS,
+  stripProviderPrefix,
+  isPipelineStatus,
+} from '@automaker/types';
 import { resolveModelString } from '@automaker/model-resolver';
 import { createLogger, loadContextFiles, classifyError } from '@automaker/utils';
 import { getFeatureDir } from '@automaker/platform';
@@ -23,7 +28,7 @@ import * as secureFs from '../../lib/secure-fs.js';
 import { validateWorkingDirectory, createAutoModeOptions } from '../../lib/sdk-options.js';
 import {
   getPromptCustomization,
-  getProviderByModelId,
+  resolveProviderContext,
   getMCPServersFromSettings,
   getDefaultMaxTurnsSetting,
 } from '../../lib/settings-helpers.js';
@@ -78,6 +83,37 @@ export class AutoModeServiceFacade {
     private readonly pipelineOrchestrator: PipelineOrchestrator,
     private readonly settingsService: SettingsService | null
   ) {}
+
+  /**
+   * Determine if a feature is eligible to be picked up by the auto-mode loop.
+   *
+   * @param feature - The feature to check
+   * @param branchName - The current worktree branch name (null for main)
+   * @param primaryBranch - The resolved primary branch name for the project
+   * @returns True if the feature is eligible for auto-dispatch
+   */
+  public static isFeatureEligibleForAutoMode(
+    feature: Feature,
+    branchName: string | null,
+    primaryBranch: string | null
+  ): boolean {
+    const isEligibleStatus =
+      feature.status === 'backlog' ||
+      feature.status === 'ready' ||
+      feature.status === 'interrupted' ||
+      isPipelineStatus(feature.status);
+
+    if (!isEligibleStatus) return false;
+
+    // Filter by branch/worktree alignment
+    if (branchName === null) {
+      // For main worktree, include features with no branch or matching primary branch
+      return !feature.branchName || (primaryBranch != null && feature.branchName === primaryBranch);
+    } else {
+      // For named worktrees, only include features matching that branch
+      return feature.branchName === branchName;
+    }
+  }
 
   /**
    * Classify and log an error at the facade boundary.
@@ -190,8 +226,7 @@ export class AutoModeServiceFacade {
     /**
      * Shared agent-run helper used by both PipelineOrchestrator and ExecutionService.
      *
-     * Resolves the model string, looks up the custom provider/credentials via
-     * getProviderByModelId, then delegates to agentExecutor.execute with the
+     * Resolves provider/model context, then delegates to agentExecutor.execute with the
      * full payload.  The opts parameter uses an index-signature union so it
      * accepts both the typed ExecutionService opts object and the looser
      * Record<string, unknown> used by PipelineOrchestrator without requiring
@@ -217,6 +252,7 @@ export class AutoModeServiceFacade {
           thinkingLevel?: ThinkingLevel;
           reasoningEffort?: ReasoningEffort;
           branchName?: string | null;
+          status?: string; // Feature status for pipeline summary check
           [key: string]: unknown;
         }
       ): Promise<void> => {
@@ -229,16 +265,19 @@ export class AutoModeServiceFacade {
           | import('@automaker/types').ClaudeCompatibleProvider
           | undefined;
         let credentials: import('@automaker/types').Credentials | undefined;
+        let providerResolvedModel: string | undefined;
+
         if (settingsService) {
-          const providerResult = await getProviderByModelId(
-            resolvedModel,
+          const providerId = opts?.providerId as string | undefined;
+          const result = await resolveProviderContext(
             settingsService,
+            resolvedModel,
+            providerId,
             '[AutoModeFacade]'
           );
-          if (providerResult.provider) {
-            claudeCompatibleProvider = providerResult.provider;
-            credentials = providerResult.credentials;
-          }
+          claudeCompatibleProvider = result.provider;
+          credentials = result.credentials;
+          providerResolvedModel = result.resolvedModel;
         }
 
         // Build sdkOptions with proper maxTurns and allowedTools for auto-mode.
@@ -264,7 +303,7 @@ export class AutoModeServiceFacade {
 
         const sdkOpts = createAutoModeOptions({
           cwd: workDir,
-          model: resolvedModel,
+          model: providerResolvedModel || resolvedModel,
           systemPrompt: opts?.systemPrompt,
           abortController,
           autoLoadClaudeMd,
@@ -276,8 +315,14 @@ export class AutoModeServiceFacade {
             | undefined,
         });
 
+        if (!sdkOpts) {
+          logger.error(
+            `[createRunAgentFn] sdkOpts is UNDEFINED! createAutoModeOptions type: ${typeof createAutoModeOptions}`
+          );
+        }
+
         logger.info(
-          `[createRunAgentFn] Feature ${featureId}: model=${resolvedModel}, ` +
+          `[createRunAgentFn] Feature ${featureId}: model=${resolvedModel} (resolved=${providerResolvedModel || resolvedModel}), ` +
             `maxTurns=${sdkOpts.maxTurns}, allowedTools=${(sdkOpts.allowedTools as string[])?.length ?? 'default'}, ` +
             `provider=${provider.getName()}`
         );
@@ -300,6 +345,7 @@ export class AutoModeServiceFacade {
             thinkingLevel: opts?.thinkingLevel as ThinkingLevel | undefined,
             reasoningEffort: opts?.reasoningEffort as ReasoningEffort | undefined,
             branchName: opts?.branchName as string | null | undefined,
+            status: opts?.status as string | undefined,
             provider,
             effectiveBareModel,
             credentials,
@@ -373,12 +419,8 @@ export class AutoModeServiceFacade {
         if (branchName === null) {
           primaryBranch = await worktreeResolver.getCurrentBranch(pPath);
         }
-        return features.filter(
-          (f) =>
-            (f.status === 'backlog' || f.status === 'ready') &&
-            (branchName === null
-              ? !f.branchName || (primaryBranch && f.branchName === primaryBranch)
-              : f.branchName === branchName)
+        return features.filter((f) =>
+          AutoModeServiceFacade.isFeatureEligibleForAutoMode(f, branchName, primaryBranch)
         );
       },
       (pPath, branchName, maxConcurrency) =>
@@ -421,9 +463,25 @@ export class AutoModeServiceFacade {
       (pPath, featureId, status) =>
         featureStateManager.updateFeatureStatus(pPath, featureId, status),
       (pPath, featureId) => featureStateManager.loadFeature(pPath, featureId),
-      async (_feature) => {
-        // getPlanningPromptPrefixFn - planning prompts handled by AutoModeService
-        return '';
+      async (feature) => {
+        // getPlanningPromptPrefixFn - select appropriate planning prompt based on feature's planningMode
+        if (!feature.planningMode || feature.planningMode === 'skip') {
+          return '';
+        }
+        const prompts = await getPromptCustomization(settingsService, '[PlanningPromptPrefix]');
+        const autoModePrompts = prompts.autoMode;
+        switch (feature.planningMode) {
+          case 'lite':
+            return feature.requirePlanApproval
+              ? autoModePrompts.planningLiteWithApproval + '\n\n'
+              : autoModePrompts.planningLite + '\n\n';
+          case 'spec':
+            return autoModePrompts.planningSpec + '\n\n';
+          case 'full':
+            return autoModePrompts.planningFull + '\n\n';
+          default:
+            return '';
+        }
       },
       (pPath, featureId, summary) =>
         featureStateManager.saveFeatureSummary(pPath, featureId, summary),
@@ -1075,12 +1133,13 @@ export class AutoModeServiceFacade {
 
   /**
    * Detect orphaned features (features with missing branches)
+   * @param preloadedFeatures - Optional pre-loaded features to avoid redundant disk reads
    */
-  async detectOrphanedFeatures(): Promise<OrphanedFeatureInfo[]> {
+  async detectOrphanedFeatures(preloadedFeatures?: Feature[]): Promise<OrphanedFeatureInfo[]> {
     const orphanedFeatures: OrphanedFeatureInfo[] = [];
 
     try {
-      const allFeatures = await this.featureLoader.getAll(this.projectPath);
+      const allFeatures = preloadedFeatures ?? (await this.featureLoader.getAll(this.projectPath));
       const featuresWithBranches = allFeatures.filter(
         (f) => f.branchName && f.branchName.trim() !== ''
       );

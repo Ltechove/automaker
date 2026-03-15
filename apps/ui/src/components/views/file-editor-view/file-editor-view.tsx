@@ -37,6 +37,7 @@ import {
   type FileTreeNode,
   type EnhancedGitFileStatus,
 } from './use-file-editor-store';
+import { normalizeLineEndings } from './file-editor-dirty-utils';
 import { FileTree } from './components/file-tree';
 import { CodeEditor, getLanguageName, type CodeEditorHandle } from './components/code-editor';
 import { EditorTabs } from './components/editor-tabs';
@@ -169,6 +170,7 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
     closeAllTabs,
     setActiveTab,
     markTabSaved,
+    refreshTabContent,
     setMarkdownViewMode,
     setMobileBrowserVisible,
     activeFileGitDetails,
@@ -360,6 +362,30 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
       const existing = tabs.find((t) => t.filePath === filePath);
       if (existing) {
         setActiveTab(existing.id);
+        // If the tab is showing as dirty, re-read from disk to verify that the
+        // stored content actually differs from what is on disk. This fixes stale
+        // isDirty=true state that can be persisted to localStorage (e.g. the file
+        // was saved externally, or the tab schema changed).
+        // We only do this when the tab IS dirty to avoid a race condition where a
+        // concurrent save clears isDirty and then our stale disk read would wrongly
+        // set it back to true.
+        if (!existing.isBinary && !existing.isTooLarge && existing.isDirty) {
+          try {
+            const api = getElectronAPI();
+            const result = await api.readFile(filePath);
+            if (result.success && result.content !== undefined && !result.content.includes('\0')) {
+              // Re-check isDirty after the async read: a concurrent save may have
+              // already cleared it. Only refresh if the tab is still dirty.
+              const { tabs: currentTabs } = useFileEditorStore.getState();
+              const currentTab = currentTabs.find((t) => t.id === existing.id);
+              if (currentTab?.isDirty) {
+                refreshTabContent(existing.id, result.content);
+              }
+            }
+          } catch {
+            // Non-critical: if we can't re-read the file, keep the persisted state
+          }
+        }
         return;
       }
 
@@ -428,11 +454,15 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
             return;
           }
 
+          // Normalize line endings to match CodeMirror's internal representation
+          // (\r\n → \n). This prevents a false dirty state when CodeMirror reports
+          // its already-normalized content back via onChange.
+          const normalizedContent = normalizeLineEndings(result.content);
           openTab({
             filePath,
             fileName,
-            content: result.content,
-            originalContent: result.content,
+            content: normalizedContent,
+            originalContent: normalizedContent,
             isDirty: false,
             scrollTop: 0,
             cursorLine: 1,
@@ -446,7 +476,7 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
         logger.error('Failed to open file:', error);
       }
     },
-    [tabs, setActiveTab, openTab, maxFileSize]
+    [tabs, setActiveTab, openTab, refreshTabContent, maxFileSize]
   );
 
   // ─── Mobile-aware file select ────────────────────────────────
@@ -489,18 +519,38 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
 
   // ─── Handle Save ─────────────────────────────────────────────
   const handleSave = useCallback(async () => {
-    if (!activeTab || !activeTab.isDirty) return;
+    // Get fresh state from the store to avoid stale closure issues
+    const {
+      tabs: currentTabs,
+      activeTabId: currentActiveTabId,
+      updateTabContent,
+    } = useFileEditorStore.getState();
+
+    if (!currentActiveTabId) return;
+
+    const tab = currentTabs.find((t) => t.id === currentActiveTabId);
+    if (!tab || !tab.isDirty) return;
+
+    // Get the current editor content directly from CodeMirror to ensure
+    // we save the latest content even if onChange hasn't fired yet
+    const editorContent = editorRef.current?.getValue();
+    const contentToSave = editorContent ?? tab.content;
+
+    // Sync the editor content to the store before saving
+    if (editorContent != null && editorContent !== tab.content) {
+      updateTabContent(tab.id, editorContent);
+    }
 
     try {
       const api = getElectronAPI();
-      const result = await api.writeFile(activeTab.filePath, activeTab.content);
+      const result = await api.writeFile(tab.filePath, contentToSave);
 
       if (result.success) {
-        markTabSaved(activeTab.id, activeTab.content);
+        markTabSaved(tab.id, contentToSave);
         // Refresh git status and inline diff after save
         loadGitStatus();
         if (showInlineDiff) {
-          loadFileDiff(activeTab.filePath);
+          loadFileDiff(tab.filePath);
         }
       } else {
         logger.error('Failed to save file:', result.error);
@@ -508,7 +558,7 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
     } catch (error) {
       logger.error('Failed to save file:', error);
     }
-  }, [activeTab, markTabSaved, loadGitStatus, showInlineDiff, loadFileDiff]);
+  }, [markTabSaved, loadGitStatus, showInlineDiff, loadFileDiff]);
 
   // ─── Auto Save: save a specific tab by ID ───────────────────
   const saveTabById = useCallback(
@@ -584,6 +634,7 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
         autoSaveTimerRef.current = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- activeTab is accessed for isDirty/content only
   }, [editorAutoSave, editorAutoSaveDelay, activeTab?.isDirty, activeTab?.content, handleSave]);
 
   // ─── Handle Search ──────────────────────────────────────────
@@ -682,6 +733,7 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
       model: string;
       thinkingLevel: string;
       reasoningEffort: string;
+      providerId?: string;
       skipTests: boolean;
       branchName: string;
       planningMode: string;
@@ -710,6 +762,7 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
             model: resolveModelString(featureData.model),
             thinkingLevel: featureData.thinkingLevel,
             reasoningEffort: featureData.reasoningEffort,
+            providerId: featureData.providerId,
             skipTests: featureData.skipTests,
             branchName: featureData.workMode === 'current' ? currentBranch : featureData.branchName,
             planningMode: featureData.planningMode,
@@ -1069,6 +1122,7 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
     } else {
       useFileEditorStore.getState().setActiveFileGitDetails(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- activeTab accessed for specific properties only
   }, [activeTab?.filePath, activeTab?.isBinary, loadFileGitDetails]);
 
   // Load file diff when inline diff is enabled and active tab changes
@@ -1078,6 +1132,7 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
     } else {
       useFileEditorStore.getState().setActiveFileDiff(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- activeTab accessed for specific properties only
   }, [
     showInlineDiff,
     activeTab?.filePath,
@@ -1179,6 +1234,37 @@ export function FileEditorView({ initialPath }: FileEditorViewProps) {
       }
     };
   }, [effectivePath, loadTree, loadGitStatus]);
+
+  // ─── Refresh persisted tabs from disk ──────────────────────
+  // After mount, re-read all persisted (non-binary, non-large) tabs from disk
+  // to sync originalContent with the actual file state. This clears stale
+  // isDirty flags caused by external file changes or serialization artifacts.
+  const hasRefreshedTabsRef = useRef(false);
+
+  useEffect(() => {
+    if (!effectivePath || hasRefreshedTabsRef.current) return;
+    const { tabs: currentTabs, refreshTabContent: refresh } = useFileEditorStore.getState();
+    if (currentTabs.length === 0) return;
+
+    hasRefreshedTabsRef.current = true;
+
+    const refreshAll = async () => {
+      const api = getElectronAPI();
+      for (const tab of currentTabs) {
+        if (tab.isBinary || tab.isTooLarge) continue;
+        try {
+          const result = await api.readFile(tab.filePath);
+          if (result.success && result.content !== undefined && !result.content.includes('\0')) {
+            refresh(tab.id, result.content);
+          }
+        } catch {
+          // File may no longer exist — leave tab state as-is
+        }
+      }
+    };
+
+    refreshAll();
+  }, [effectivePath]);
 
   // Open initial path if provided
   useEffect(() => {

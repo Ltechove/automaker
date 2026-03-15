@@ -47,6 +47,8 @@ export interface ParsedTask {
   phase?: string;
   /** Task execution status */
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  /** Optional task summary, e.g., "Created User model with email and password fields" */
+  summary?: string;
 }
 
 /**
@@ -96,11 +98,13 @@ export interface Feature {
   excludedPipelineSteps?: string[]; // Array of pipeline step IDs to skip for this feature
   thinkingLevel?: ThinkingLevel;
   reasoningEffort?: ReasoningEffort;
+  providerId?: string;
   planningMode?: PlanningMode;
   requirePlanApproval?: boolean;
   planSpec?: PlanSpec;
   error?: string;
   summary?: string;
+  createdAt?: string; // ISO timestamp when feature was created
   startedAt?: string;
   descriptionHistory?: DescriptionHistoryEntry[]; // History of description changes
   [key: string]: unknown; // Keep catch-all for extensibility

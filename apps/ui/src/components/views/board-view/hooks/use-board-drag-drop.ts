@@ -1,9 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { createLogger } from '@automaker/utils/logger';
 import { DragStartEvent, DragEndEvent } from '@dnd-kit/core';
 import { Feature } from '@/store/app-store';
 import { useAppStore } from '@/store/app-store';
-import { useAutoMode } from '@/hooks/use-auto-mode';
 import { toast } from 'sonner';
 import { COLUMNS, ColumnId } from '../constants';
 
@@ -20,6 +19,7 @@ interface UseBoardDragDropProps {
   runningAutoTasks: string[];
   persistFeatureUpdate: (featureId: string, updates: Partial<Feature>) => Promise<void>;
   handleStartImplementation: (feature: Feature) => Promise<boolean>;
+  stopFeature: (featureId: string) => Promise<boolean>;
 }
 
 export function useBoardDragDrop({
@@ -28,6 +28,7 @@ export function useBoardDragDrop({
   runningAutoTasks,
   persistFeatureUpdate,
   handleStartImplementation,
+  stopFeature,
 }: UseBoardDragDropProps) {
   const [activeFeature, setActiveFeature] = useState<Feature | null>(null);
   const [pendingDependencyLink, setPendingDependencyLink] = useState<PendingDependencyLink | null>(
@@ -37,12 +38,22 @@ export function useBoardDragDrop({
   // subscribing to the entire store. Bare useAppStore() causes the host component
   // (BoardView) to re-render on EVERY store change, which cascades through effects
   // and triggers React error #185 (maximum update depth exceeded).
-  const moveFeature = useAppStore((s) => s.moveFeature);
   const updateFeature = useAppStore((s) => s.updateFeature);
-  const autoMode = useAutoMode();
 
   // Note: getOrCreateWorktreeForFeature removed - worktrees are now created server-side
   // at execution time based on feature.branchName
+
+  // Clear stale activeFeature when features list changes (e.g. during worktree switches).
+  // Without this, the DragOverlay in KanbanBoard can try to render a feature from
+  // a previous worktree, causing property access crashes.
+  useEffect(() => {
+    setActiveFeature((current) => {
+      if (!current) return null;
+      // If the active feature is no longer in the features list, clear it
+      const stillExists = features.some((f) => f.id === current.id);
+      return stillExists ? current : null;
+    });
+  }, [features]);
 
   const handleDragStart = useCallback(
     (event: DragStartEvent) => {
@@ -195,15 +206,15 @@ export function useBoardDragDrop({
       if (targetStatus === draggedFeature.status) return;
 
       // Handle different drag scenarios
-      // Note: Worktrees are created server-side at execution time based on feature.branchName
-      if (draggedFeature.status === 'backlog') {
+      // Note: persistFeatureUpdate handles optimistic RQ cache update internally,
+      // so no separate moveFeature() call is needed.
+      if (draggedFeature.status === 'backlog' || draggedFeature.status === 'merge_conflict') {
         // From backlog
         if (targetStatus === 'in_progress') {
           // Use helper function to handle concurrency check and start implementation
           // Server will derive workDir from feature.branchName
           await handleStartImplementation(draggedFeature);
         } else {
-          moveFeature(featureId, targetStatus);
           persistFeatureUpdate(featureId, { status: targetStatus });
         }
       } else if (draggedFeature.status === 'waiting_approval') {
@@ -211,7 +222,6 @@ export function useBoardDragDrop({
         // NOTE: This check must come BEFORE skipTests check because waiting_approval
         // features often have skipTests=true, and we want status-based handling first
         if (targetStatus === 'verified') {
-          moveFeature(featureId, 'verified');
           // Clear justFinishedAt timestamp when manually verifying via drag
           persistFeatureUpdate(featureId, {
             status: 'verified',
@@ -225,7 +235,6 @@ export function useBoardDragDrop({
           });
         } else if (targetStatus === 'backlog') {
           // Allow moving waiting_approval cards back to backlog
-          moveFeature(featureId, 'backlog');
           // Clear justFinishedAt timestamp when moving back to backlog
           persistFeatureUpdate(featureId, {
             status: 'backlog',
@@ -244,8 +253,12 @@ export function useBoardDragDrop({
           // If the feature is currently running, stop it first
           if (isRunningTask) {
             try {
-              await autoMode.stopFeature(featureId);
-              logger.info('Stopped running feature via drag to backlog:', featureId);
+              const stopped = await stopFeature(featureId);
+              if (stopped) {
+                logger.info('Stopped running feature via drag to backlog:', featureId);
+              } else {
+                logger.warn('Feature was not running by the time stop was requested:', featureId);
+              }
             } catch (error) {
               logger.error('Error stopping feature during drag to backlog:', error);
               toast.error('Failed to stop agent', {
@@ -253,7 +266,6 @@ export function useBoardDragDrop({
               });
             }
           }
-          moveFeature(featureId, 'backlog');
           persistFeatureUpdate(featureId, { status: 'backlog' });
           toast.info(
             isRunningTask
@@ -275,7 +287,6 @@ export function useBoardDragDrop({
           return;
         } else if (targetStatus === 'verified' && draggedFeature.skipTests) {
           // Manual verify via drag (only for skipTests features)
-          moveFeature(featureId, 'verified');
           persistFeatureUpdate(featureId, { status: 'verified' });
           toast.success('Feature verified', {
             description: `Marked as verified: ${draggedFeature.description.slice(
@@ -288,7 +299,6 @@ export function useBoardDragDrop({
         // skipTests feature being moved between verified and waiting_approval
         if (targetStatus === 'waiting_approval' && draggedFeature.status === 'verified') {
           // Move verified feature back to waiting_approval
-          moveFeature(featureId, 'waiting_approval');
           persistFeatureUpdate(featureId, { status: 'waiting_approval' });
           toast.info('Feature moved back', {
             description: `Moved back to Waiting Approval: ${draggedFeature.description.slice(
@@ -298,7 +308,6 @@ export function useBoardDragDrop({
           });
         } else if (targetStatus === 'backlog') {
           // Allow moving skipTests cards back to backlog (from verified)
-          moveFeature(featureId, 'backlog');
           persistFeatureUpdate(featureId, { status: 'backlog' });
           toast.info('Feature moved to backlog', {
             description: `Moved to Backlog: ${draggedFeature.description.slice(
@@ -311,7 +320,6 @@ export function useBoardDragDrop({
         // Handle verified TDD (non-skipTests) features being moved back
         if (targetStatus === 'waiting_approval') {
           // Move verified feature back to waiting_approval
-          moveFeature(featureId, 'waiting_approval');
           persistFeatureUpdate(featureId, { status: 'waiting_approval' });
           toast.info('Feature moved back', {
             description: `Moved back to Waiting Approval: ${draggedFeature.description.slice(
@@ -321,7 +329,6 @@ export function useBoardDragDrop({
           });
         } else if (targetStatus === 'backlog') {
           // Allow moving verified cards back to backlog
-          moveFeature(featureId, 'backlog');
           persistFeatureUpdate(featureId, { status: 'backlog' });
           toast.info('Feature moved to backlog', {
             description: `Moved to Backlog: ${draggedFeature.description.slice(
@@ -335,11 +342,10 @@ export function useBoardDragDrop({
     [
       features,
       runningAutoTasks,
-      moveFeature,
       updateFeature,
       persistFeatureUpdate,
       handleStartImplementation,
-      autoMode,
+      stopFeature,
     ]
   );
 

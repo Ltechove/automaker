@@ -295,6 +295,7 @@ const initialState: AppState = {
   chatHistoryOpen: false,
   autoModeByWorktree: {},
   autoModeActivityLog: [],
+  recentlyCompletedFeatures: new Set<string>(),
   maxConcurrency: DEFAULT_MAX_CONCURRENCY,
   boardViewMode: 'kanban',
   defaultSkipTests: true,
@@ -310,6 +311,7 @@ const initialState: AppState = {
   keyboardShortcuts: DEFAULT_KEYBOARD_SHORTCUTS,
   muteDoneSound: false,
   disableSplashScreen: false,
+  defaultSortNewestCardOnTop: false,
   serverLogLevel: 'info',
   enableRequestLogging: true,
   showQueryDevtools: true,
@@ -332,6 +334,7 @@ const initialState: AppState = {
   opencodeDefaultModel: DEFAULT_OPENCODE_MODEL,
   dynamicOpencodeModels: [],
   enabledDynamicModelIds: [],
+  knownDynamicModelIds: [],
   cachedOpencodeProviders: [],
   opencodeModelsLoading: false,
   opencodeModelsError: null,
@@ -358,6 +361,7 @@ const initialState: AppState = {
   subagentsSources: ['user', 'project'] as Array<'user' | 'project'>,
   promptCustomization: {},
   eventHooks: [],
+  ntfyEndpoints: [],
   featureTemplates: DEFAULT_GLOBAL_SETTINGS.featureTemplates ?? [],
   claudeCompatibleProviders: [],
   claudeApiProfiles: [],
@@ -1040,6 +1044,9 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     set((state) => {
       const current = state.autoModeByWorktree[key];
       if (!current) return state;
+      // Idempotent: skip if task is not in the list to avoid creating new
+      // object references that trigger unnecessary re-renders.
+      if (!current.runningTasks.includes(taskId)) return state;
       return {
         autoModeByWorktree: {
           ...state.autoModeByWorktree,
@@ -1090,6 +1097,23 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     })),
 
   clearAutoModeActivity: () => set({ autoModeActivityLog: [] }),
+
+  addRecentlyCompletedFeature: (featureId: string) => {
+    set((state) => {
+      // Idempotent: skip if already tracked to avoid creating a new Set reference
+      // that triggers unnecessary re-renders in useBoardColumnFeatures.
+      if (state.recentlyCompletedFeatures.has(featureId)) return state;
+      const newSet = new Set(state.recentlyCompletedFeatures);
+      newSet.add(featureId);
+      return { recentlyCompletedFeatures: newSet };
+    });
+  },
+
+  clearRecentlyCompletedFeatures: () => {
+    // Idempotent: skip if already empty to avoid creating a new Set reference.
+    if (get().recentlyCompletedFeatures.size === 0) return;
+    set({ recentlyCompletedFeatures: new Set() });
+  },
 
   setMaxConcurrency: (max) => set({ maxConcurrency: max }),
 
@@ -1222,6 +1246,9 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   // Splash Screen actions
   setDisableSplashScreen: (disabled) => set({ disableSplashScreen: disabled }),
 
+  // Board Card Sorting (global default) actions
+  setDefaultSortNewestCardOnTop: (enabled) => set({ defaultSortNewestCardOnTop: enabled }),
+
   // Server Log Level actions
   setServerLogLevel: (level) => set({ serverLogLevel: level }),
   setEnableRequestLogging: (enabled) => set({ enableRequestLogging: enabled }),
@@ -1344,21 +1371,52 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
 
   // OpenCode CLI Settings actions
   setEnabledOpencodeModels: (models) => set({ enabledOpencodeModels: models }),
-  setOpencodeDefaultModel: (model) => set({ opencodeDefaultModel: model }),
-  toggleOpencodeModel: (model, enabled) =>
+  setOpencodeDefaultModel: async (model) => {
+    set({ opencodeDefaultModel: model });
+    try {
+      const httpApi = getHttpApiClient();
+      await httpApi.settings.updateGlobal({ opencodeDefaultModel: model });
+    } catch (error) {
+      logger.error('Failed to sync opencodeDefaultModel:', error);
+    }
+  },
+  toggleOpencodeModel: async (model, enabled) => {
     set((state) => ({
       enabledOpencodeModels: enabled
-        ? [...state.enabledOpencodeModels, model]
+        ? [...new Set([...state.enabledOpencodeModels, model])]
         : state.enabledOpencodeModels.filter((m) => m !== model),
-    })),
+    }));
+    try {
+      const httpApi = getHttpApiClient();
+      await httpApi.settings.updateGlobal({ enabledOpencodeModels: get().enabledOpencodeModels });
+    } catch (error) {
+      logger.error('Failed to sync enabledOpencodeModels:', error);
+    }
+  },
   setDynamicOpencodeModels: (models) => set({ dynamicOpencodeModels: models }),
-  setEnabledDynamicModelIds: (ids) => set({ enabledDynamicModelIds: ids }),
-  toggleDynamicModel: (modelId, enabled) =>
+  setEnabledDynamicModelIds: async (ids) => {
+    const deduped = Array.from(new Set(ids));
+    set({ enabledDynamicModelIds: deduped });
+    try {
+      const httpApi = getHttpApiClient();
+      await httpApi.settings.updateGlobal({ enabledDynamicModelIds: deduped });
+    } catch (error) {
+      logger.error('Failed to sync enabledDynamicModelIds:', error);
+    }
+  },
+  toggleDynamicModel: async (modelId, enabled) => {
     set((state) => ({
       enabledDynamicModelIds: enabled
-        ? [...state.enabledDynamicModelIds, modelId]
+        ? [...new Set([...state.enabledDynamicModelIds, modelId])]
         : state.enabledDynamicModelIds.filter((id) => id !== modelId),
-    })),
+    }));
+    try {
+      const httpApi = getHttpApiClient();
+      await httpApi.settings.updateGlobal({ enabledDynamicModelIds: get().enabledDynamicModelIds });
+    } catch (error) {
+      logger.error('Failed to sync enabledDynamicModelIds:', error);
+    }
+  },
   setCachedOpencodeProviders: (providers) => set({ cachedOpencodeProviders: providers }),
 
   // Gemini CLI Settings actions
@@ -1448,9 +1506,28 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     set({ eventHooks: hooks });
     try {
       const httpApi = getHttpApiClient();
-      await httpApi.settings.updateGlobal({ eventHooks: hooks });
+      await httpApi.settings.updateGlobal({
+        eventHooks: hooks,
+        // Signal the server that an empty array is intentional (not a wipe from stale state)
+        ...(hooks.length === 0 ? { __allowEmptyEventHooks: true } : {}),
+      });
     } catch (error) {
       logger.error('Failed to sync event hooks:', error);
+    }
+  },
+
+  // Ntfy Endpoint actions
+  setNtfyEndpoints: async (endpoints) => {
+    set({ ntfyEndpoints: endpoints });
+    try {
+      const httpApi = getHttpApiClient();
+      await httpApi.settings.updateGlobal({
+        ntfyEndpoints: endpoints,
+        // Signal the server that an empty array is intentional (not a wipe from stale state)
+        ...(endpoints.length === 0 ? { __allowEmptyNtfyEndpoints: true } : {}),
+      });
+    } catch (error) {
+      logger.error('Failed to sync ntfy endpoints:', error);
     }
   },
 
@@ -2453,9 +2530,33 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   setSpecCreatingForProject: (projectPath) => set({ specCreatingForProject: projectPath }),
   isSpecCreatingForProject: (projectPath) => get().specCreatingForProject === projectPath,
 
-  setDefaultPlanningMode: (mode) => set({ defaultPlanningMode: mode }),
-  setDefaultRequirePlanApproval: (require) => set({ defaultRequirePlanApproval: require }),
-  setDefaultFeatureModel: (entry) => set({ defaultFeatureModel: entry }),
+  setDefaultPlanningMode: async (mode) => {
+    set({ defaultPlanningMode: mode });
+    try {
+      const httpApi = getHttpApiClient();
+      await httpApi.settings.updateGlobal({ defaultPlanningMode: mode });
+    } catch (error) {
+      logger.error('Failed to sync defaultPlanningMode:', error);
+    }
+  },
+  setDefaultRequirePlanApproval: async (require) => {
+    set({ defaultRequirePlanApproval: require });
+    try {
+      const httpApi = getHttpApiClient();
+      await httpApi.settings.updateGlobal({ defaultRequirePlanApproval: require });
+    } catch (error) {
+      logger.error('Failed to sync defaultRequirePlanApproval:', error);
+    }
+  },
+  setDefaultFeatureModel: async (entry) => {
+    set({ defaultFeatureModel: entry });
+    try {
+      const httpApi = getHttpApiClient();
+      await httpApi.settings.updateGlobal({ defaultFeatureModel: entry });
+    } catch (error) {
+      logger.error('Failed to sync defaultFeatureModel:', error);
+    }
+  },
 
   setDefaultThinkingLevel: async (level) => {
     const currentModel = get().defaultFeatureModel;
@@ -2464,20 +2565,30 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
 
     // Also update defaultFeatureModel's thinkingLevel if compatible
     if (availableLevels.includes(level)) {
+      const updatedFeatureModel = { ...currentModel, thinkingLevel: level };
       set({
         defaultThinkingLevel: level,
-        defaultFeatureModel: { ...currentModel, thinkingLevel: level },
+        defaultFeatureModel: updatedFeatureModel,
       });
+      // Sync to server - include defaultFeatureModel since thinkingLevel is embedded there too
+      try {
+        const httpApi = getHttpApiClient();
+        await httpApi.settings.updateGlobal({
+          defaultThinkingLevel: level,
+          defaultFeatureModel: updatedFeatureModel,
+        });
+      } catch (error) {
+        logger.error('Failed to sync defaultThinkingLevel:', error);
+      }
     } else {
       set({ defaultThinkingLevel: level });
-    }
-
-    // Sync to server
-    try {
-      const httpApi = getHttpApiClient();
-      await httpApi.settings.updateGlobal({ defaultThinkingLevel: level });
-    } catch (error) {
-      logger.error('Failed to sync defaultThinkingLevel:', error);
+      // Sync to server
+      try {
+        const httpApi = getHttpApiClient();
+        await httpApi.settings.updateGlobal({ defaultThinkingLevel: level });
+      } catch (error) {
+        logger.error('Failed to sync defaultThinkingLevel:', error);
+      }
     }
   },
 
@@ -2866,13 +2977,43 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
           (m) => !m.id.startsWith(OPENCODE_BEDROCK_MODEL_PREFIX)
         );
 
+        // Auto-enable only models that are genuinely new (never seen before).
+        // Models that existed previously and were explicitly deselected by the user
+        // should NOT be re-enabled on subsequent fetches.
+        const currentEnabledIds = get().enabledDynamicModelIds;
+        const currentKnownIds = get().knownDynamicModelIds;
+        const allFetchedIds = filteredModels.map((m) => m.id);
+        // Only auto-enable models that have NEVER been seen before (not in knownDynamicModelIds)
+        const trulyNewModelIds = allFetchedIds.filter((id) => !currentKnownIds.includes(id));
+        const updatedEnabledIds =
+          trulyNewModelIds.length > 0
+            ? [...new Set([...currentEnabledIds, ...trulyNewModelIds])]
+            : currentEnabledIds;
+        // Track all discovered model IDs (union of known + newly fetched)
+        const updatedKnownIds = [...new Set([...currentKnownIds, ...allFetchedIds])];
+
         set({
           dynamicOpencodeModels: filteredModels,
+          enabledDynamicModelIds: updatedEnabledIds,
+          knownDynamicModelIds: updatedKnownIds,
           cachedOpencodeProviders: data.providers ?? [],
           opencodeModelsLoading: false,
           opencodeModelsLastFetched: now,
           opencodeModelsError: null,
         });
+
+        // Persist newly enabled model IDs and known model IDs to server settings
+        if (trulyNewModelIds.length > 0) {
+          try {
+            const httpApi = getHttpApiClient();
+            await httpApi.settings.updateGlobal({
+              enabledDynamicModelIds: updatedEnabledIds,
+              knownDynamicModelIds: updatedKnownIds,
+            });
+          } catch (syncError) {
+            logger.error('Failed to sync enabledDynamicModelIds after auto-enable:', syncError);
+          }
+        }
       } else {
         set({
           opencodeModelsLoading: false,

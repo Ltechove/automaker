@@ -239,6 +239,8 @@ export interface RunningAgent {
   projectPath: string;
   projectName: string;
   isAutoMode: boolean;
+  model?: string;
+  provider?: string;
   title?: string;
   description?: string;
   branchName?: string;
@@ -370,7 +372,8 @@ export interface GitHubAPI {
     issue: IssueValidationInput,
     model?: ModelId,
     thinkingLevel?: ThinkingLevel,
-    reasoningEffort?: ReasoningEffort
+    reasoningEffort?: ReasoningEffort,
+    providerId?: string
   ) => Promise<{ success: boolean; message?: string; issueNumber?: number; error?: string }>;
   /** Check validation status for an issue or all issues */
   getValidationStatus: (
@@ -520,6 +523,35 @@ export interface FeaturesAPI {
     description: string,
     projectPath?: string
   ) => Promise<{ success: boolean; title?: string; error?: string }>;
+  getOrphaned: (projectPath: string) => Promise<{
+    success: boolean;
+    orphanedFeatures?: Array<{ feature: Feature; missingBranch: string }>;
+    error?: string;
+  }>;
+  resolveOrphaned: (
+    projectPath: string,
+    featureId: string,
+    action: 'delete' | 'create-worktree' | 'move-to-branch',
+    targetBranch?: string | null
+  ) => Promise<{
+    success: boolean;
+    action?: string;
+    worktreePath?: string;
+    branchName?: string;
+    error?: string;
+  }>;
+  bulkResolveOrphaned: (
+    projectPath: string,
+    featureIds: string[],
+    action: 'delete' | 'create-worktree' | 'move-to-branch',
+    targetBranch?: string | null
+  ) => Promise<{
+    success: boolean;
+    resolvedCount?: number;
+    failedCount?: number;
+    results?: Array<{ featureId: string; success: boolean; action?: string; error?: string }>;
+    error?: string;
+  }>;
 }
 
 export interface AutoModeAPI {
@@ -2388,12 +2420,18 @@ function createMockWorktreeAPI(): WorktreeAPI {
       };
     },
 
-    pull: async (worktreePath: string, remote?: string, stashIfNeeded?: boolean) => {
+    pull: async (
+      worktreePath: string,
+      remote?: string,
+      stashIfNeeded?: boolean,
+      remoteBranch?: string
+    ) => {
       const targetRemote = remote || 'origin';
       console.log('[Mock] Pulling latest changes for:', {
         worktreePath,
         remote: targetRemote,
         stashIfNeeded,
+        remoteBranch,
       });
       return {
         success: true,
@@ -2901,8 +2939,8 @@ function createMockWorktreeAPI(): WorktreeAPI {
         },
       };
     },
-    rebase: async (worktreePath: string, ontoBranch: string) => {
-      console.log('[Mock] Rebase:', { worktreePath, ontoBranch });
+    rebase: async (worktreePath: string, ontoBranch: string, remote?: string) => {
+      console.log('[Mock] Rebase:', { worktreePath, ontoBranch, remote });
       return {
         success: true,
         result: {
@@ -3932,6 +3970,25 @@ function createMockFeaturesAPI(): FeaturesAPI {
       const title = words.length > 40 ? words.substring(0, 40) + '...' : words;
       return { success: true, title: `Add ${title}` };
     },
+    getOrphaned: async (_projectPath: string) => {
+      return { success: true, orphanedFeatures: [] };
+    },
+    resolveOrphaned: async (
+      _projectPath: string,
+      _featureId: string,
+      _action: 'delete' | 'create-worktree' | 'move-to-branch',
+      _targetBranch?: string | null
+    ) => {
+      return { success: false, error: 'Not supported in mock mode' };
+    },
+    bulkResolveOrphaned: async (
+      _projectPath: string,
+      _featureIds: string[],
+      _action: 'delete' | 'create-worktree' | 'move-to-branch',
+      _targetBranch?: string | null
+    ) => {
+      return { success: false, error: 'Not supported in mock mode' };
+    },
   };
 }
 
@@ -3994,7 +4051,8 @@ function createMockGitHubAPI(): GitHubAPI {
       issue: IssueValidationInput,
       model?: ModelId,
       thinkingLevel?: ThinkingLevel,
-      reasoningEffort?: ReasoningEffort
+      reasoningEffort?: ReasoningEffort,
+      providerId?: string
     ) => {
       console.log('[Mock] Starting async validation:', {
         projectPath,
@@ -4002,6 +4060,7 @@ function createMockGitHubAPI(): GitHubAPI {
         model,
         thinkingLevel,
         reasoningEffort,
+        providerId,
       });
 
       // Simulate async validation in background

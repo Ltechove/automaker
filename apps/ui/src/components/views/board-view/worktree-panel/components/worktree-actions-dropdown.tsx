@@ -46,11 +46,19 @@ import {
   ArrowLeftRight,
   Check,
   Hash,
+  Sparkles,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { Spinner } from '@/components/ui/spinner';
-import type { WorktreeInfo, DevServerInfo, PRInfo, GitRepoStatus, TestSessionInfo } from '../types';
+import type {
+  WorktreeInfo,
+  DevServerInfo,
+  PRInfo,
+  GitRepoStatus,
+  TestSessionInfo,
+  MergeConflictInfo,
+} from '../types';
 import { TooltipWrapper } from './tooltip-wrapper';
 import { useAvailableEditors, useEffectiveDefaultEditor } from '../hooks/use-available-editors';
 import {
@@ -70,7 +78,8 @@ interface WorktreeActionsDropdownProps {
   hasRemoteBranch: boolean;
   isPulling: boolean;
   isPushing: boolean;
-  isStartingDevServer: boolean;
+  isStartingAnyDevServer: boolean;
+  isDevServerStarting: boolean;
   isDevServerRunning: boolean;
   devServerInfo?: DevServerInfo;
   gitRepoStatus: GitRepoStatus;
@@ -136,6 +145,8 @@ interface WorktreeActionsDropdownProps {
   onAbortOperation?: (worktree: WorktreeInfo) => void;
   /** Continue an in-progress merge/rebase/cherry-pick after resolving conflicts */
   onContinueOperation?: (worktree: WorktreeInfo) => void;
+  /** Create a feature to resolve merge/rebase/cherry-pick conflicts with AI */
+  onCreateConflictResolutionFeature?: (conflictInfo: MergeConflictInfo) => void;
   hasInitScript: boolean;
   /** Terminal quick scripts configured for the project */
   terminalScripts?: TerminalScript[];
@@ -244,7 +255,8 @@ export function WorktreeActionsDropdown({
   hasRemoteBranch,
   isPulling,
   isPushing,
-  isStartingDevServer,
+  isStartingAnyDevServer,
+  isDevServerStarting,
   isDevServerRunning,
   devServerInfo,
   gitRepoStatus,
@@ -291,6 +303,7 @@ export function WorktreeActionsDropdown({
   onCherryPick,
   onAbortOperation,
   onContinueOperation,
+  onCreateConflictResolutionFeature,
   hasInitScript,
   terminalScripts,
   onRunTerminalScript,
@@ -465,6 +478,23 @@ export function WorktreeActionsDropdown({
                       : 'Operation'}
               </DropdownMenuItem>
             )}
+            {onCreateConflictResolutionFeature && (
+              <DropdownMenuItem
+                onClick={() =>
+                  onCreateConflictResolutionFeature({
+                    sourceBranch: worktree.conflictSourceBranch ?? worktree.branch,
+                    targetBranch: worktree.branch,
+                    targetWorktreePath: worktree.path,
+                    conflictFiles: worktree.conflictFiles,
+                    operationType: worktree.conflictType,
+                  })
+                }
+                className="text-xs text-purple-500 focus:text-purple-600"
+              >
+                <Sparkles className="w-3.5 h-3.5 mr-2" />
+                Resolve with AI
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
           </>
         )}
@@ -550,20 +580,26 @@ export function WorktreeActionsDropdown({
               <div className="flex items-center">
                 <DropdownMenuItem
                   onClick={() => onStartDevServer(worktree)}
-                  disabled={isStartingDevServer}
+                  disabled={isStartingAnyDevServer || isDevServerStarting}
                   className="text-xs flex-1 pr-0 rounded-r-none"
                 >
                   <Play
-                    className={cn('w-3.5 h-3.5 mr-2', isStartingDevServer && 'animate-pulse')}
+                    className={cn(
+                      'w-3.5 h-3.5 mr-2',
+                      (isStartingAnyDevServer || isDevServerStarting) && 'animate-pulse'
+                    )}
                   />
-                  {isStartingDevServer ? 'Starting...' : 'Start Dev Server'}
+                  {isStartingAnyDevServer || isDevServerStarting
+                    ? 'Starting...'
+                    : 'Start Dev Server'}
                 </DropdownMenuItem>
                 <DropdownMenuSubTrigger
                   className={cn(
                     'text-xs px-1 rounded-l-none border-l border-border/30 h-8',
-                    isStartingDevServer && 'opacity-50 cursor-not-allowed'
+                    (isStartingAnyDevServer || isDevServerStarting) &&
+                      'opacity-50 cursor-not-allowed'
                   )}
-                  disabled={isStartingDevServer}
+                  disabled={isStartingAnyDevServer || isDevServerStarting}
                 />
               </div>
               <DropdownMenuSubContent>{viewDevServerLogsItem}</DropdownMenuSubContent>

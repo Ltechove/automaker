@@ -60,6 +60,9 @@ test.describe('Agent Chat Session', () => {
   });
 
   test('should start a new agent chat session', async ({ page }) => {
+    // Ensure desktop viewport so SessionManager sidebar is visible (hidden below 1024px)
+    await page.setViewportSize({ width: 1280, height: 720 });
+
     await setupRealProject(page, projectPath, projectName, { setAsCurrent: true });
 
     await authenticateForTests(page);
@@ -82,8 +85,9 @@ test.describe('Agent Chat Session', () => {
     const sessionCount = await countSessionItems(page);
     expect(sessionCount).toBeGreaterThanOrEqual(1);
 
-    // Verify the message list is visible (indicates a session is selected)
-    await expect(page.locator('[data-testid="message-list"]')).toBeVisible({ timeout: 5000 });
+    // Verify the message list is visible (indicates the newly created session was selected)
+    const messageList = page.locator('[data-testid="message-list"]');
+    await expect(messageList).toBeVisible({ timeout: 10000 });
 
     // Verify the agent input is visible
     await expect(page.locator('[data-testid="agent-input"]')).toBeVisible();

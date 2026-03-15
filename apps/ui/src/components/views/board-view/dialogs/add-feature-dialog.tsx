@@ -24,16 +24,11 @@ import {
 import { Play, Cpu, FolderKanban, Settings2 } from 'lucide-react';
 import { useNavigate } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import { cn } from '@/lib/utils';
-import { modelSupportsThinking } from '@/lib/utils';
+import { cn, normalizeModelEntry } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
 import type { ThinkingLevel, PlanningMode, Feature, FeatureImage } from '@/store/types';
 import type { ReasoningEffort, PhaseModelEntry, AgentModel } from '@automaker/types';
-import {
-  supportsReasoningEffort,
-  normalizeThinkingLevelForModel,
-  getThinkingLevelsForModel,
-} from '@automaker/types';
+import { normalizeThinkingLevelForModel, getThinkingLevelsForModel } from '@automaker/types';
 import {
   PrioritySelector,
   WorkModeSelector,
@@ -90,6 +85,7 @@ type FeatureData = {
   model: AgentModel;
   thinkingLevel: ThinkingLevel;
   reasoningEffort: ReasoningEffort;
+  providerId?: string;
   branchName: string;
   priority: number;
   planningMode: PlanningMode;
@@ -301,9 +297,9 @@ export function AddFeatureDialog({
     prefilledCategory,
   ]);
 
-  // Clear requirePlanApproval when planning mode is skip or lite
+  // Clear requirePlanApproval when planning mode is skip (lite supports approval)
   useEffect(() => {
-    if (planningMode === 'skip' || planningMode === 'lite') {
+    if (planningMode === 'skip') {
       setRequirePlanApproval(false);
     }
   }, [planningMode]);
@@ -327,13 +323,7 @@ export function AddFeatureDialog({
     }
 
     const finalCategory = category || 'Uncategorized';
-    const selectedModel = modelEntry.model;
-    const normalizedThinking = modelSupportsThinking(selectedModel)
-      ? modelEntry.thinkingLevel || 'none'
-      : 'none';
-    const normalizedReasoning = supportsReasoningEffort(selectedModel)
-      ? modelEntry.reasoningEffort || 'none'
-      : 'none';
+    const normalizedEntry = normalizeModelEntry(modelEntry);
 
     // For 'current' mode, use empty string (work on current branch)
     // For 'auto' mode, use empty string (will be auto-generated in use-board-actions)
@@ -381,9 +371,10 @@ export function AddFeatureDialog({
       imagePaths,
       textFilePaths,
       skipTests,
-      model: selectedModel,
-      thinkingLevel: normalizedThinking,
-      reasoningEffort: normalizedReasoning,
+      model: normalizedEntry.model,
+      thinkingLevel: normalizedEntry.thinkingLevel,
+      reasoningEffort: normalizedEntry.reasoningEffort,
+      providerId: normalizedEntry.providerId,
       branchName: finalBranchName,
       priority,
       planningMode,
@@ -643,14 +634,14 @@ export function AddFeatureDialog({
                       id="add-feature-require-approval"
                       checked={requirePlanApproval}
                       onCheckedChange={(checked) => setRequirePlanApproval(!!checked)}
-                      disabled={planningMode === 'skip' || planningMode === 'lite'}
+                      disabled={planningMode === 'skip'}
                       data-testid="add-feature-planning-require-approval-checkbox"
                     />
                     <Label
                       htmlFor="add-feature-require-approval"
                       className={cn(
                         'text-xs font-normal',
-                        planningMode === 'skip' || planningMode === 'lite'
+                        planningMode === 'skip'
                           ? 'cursor-not-allowed text-muted-foreground'
                           : 'cursor-pointer'
                       )}

@@ -129,12 +129,41 @@ export const isConnectionError = (error: unknown): boolean => {
 };
 
 /**
- * Handle a server offline error by notifying the UI to redirect.
- * Call this when a connection error is detected.
+ * Handle a server offline error by verifying the server is actually down
+ * before redirecting to login. Uses debouncing to coalesce rapid errors
+ * and a health check to confirm the server isn't just experiencing a
+ * transient network blip.
  */
+let serverOfflineCheckPending = false;
+
 export const handleServerOffline = (): void => {
-  logger.error('Server appears to be offline, redirecting to login...');
-  notifyServerOffline();
+  // Debounce: if a check is already in progress, skip
+  if (serverOfflineCheckPending) return;
+  serverOfflineCheckPending = true;
+
+  // Wait briefly to let transient errors settle, then verify with a health check
+  setTimeout(() => {
+    (async () => {
+      try {
+        const response = await fetch(`${getServerUrl()}/api/health`, {
+          method: 'GET',
+          cache: NO_STORE_CACHE_MODE,
+          signal: AbortSignal.timeout(5000),
+        });
+        if (response.ok) {
+          logger.info('Server health check passed, ignoring transient connection error');
+          return;
+        }
+      } catch {
+        // Health check failed - server is genuinely offline
+      }
+
+      logger.error('Server appears to be offline, redirecting to login...');
+      notifyServerOffline();
+    })().finally(() => {
+      serverOfflineCheckPending = false;
+    });
+  }, 2000);
 };
 
 /**
@@ -565,6 +594,7 @@ type EventType =
   | 'worktree:init-started'
   | 'worktree:init-output'
   | 'worktree:init-completed'
+  | 'dev-server:starting'
   | 'dev-server:started'
   | 'dev-server:output'
   | 'dev-server:stopped'
@@ -583,6 +613,11 @@ interface DevServerUrlEvent {
   worktreePath: string;
   url: string;
   port: number;
+  timestamp: string;
+}
+
+export interface DevServerStartingEvent {
+  worktreePath: string;
   timestamp: string;
 }
 
@@ -605,6 +640,7 @@ export interface DevServerStoppedEvent {
 export type DevServerUrlDetectedEvent = DevServerUrlEvent;
 
 export type DevServerLogEvent =
+  | { type: 'dev-server:starting'; payload: DevServerStartingEvent }
   | { type: 'dev-server:started'; payload: DevServerStartedEvent }
   | { type: 'dev-server:output'; payload: DevServerOutputEvent }
   | { type: 'dev-server:stopped'; payload: DevServerStoppedEvent }
@@ -887,17 +923,20 @@ export class HttpApiClient implements ElectronAPI {
       this.ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          logger.info(
-            'WebSocket message:',
-            data.type,
-            'hasPayload:',
-            !!data.payload,
-            'callbacksRegistered:',
-            this.eventCallbacks.has(data.type)
-          );
+          // Only log non-high-frequency events to avoid progressive memory growth
+          // from accumulated console entries. High-frequency events (dev-server output,
+          // test runner output, agent progress) fire 10+ times/sec and would generate
+          // thousands of console entries per minute.
+          const isHighFrequency =
+            data.type === 'dev-server:output' ||
+            data.type === 'test-runner:output' ||
+            data.type === 'feature:progress' ||
+            (data.type === 'auto-mode:event' && data.payload?.type === 'auto_mode_progress');
+          if (!isHighFrequency) {
+            logger.info('WebSocket message:', data.type);
+          }
           const callbacks = this.eventCallbacks.get(data.type);
           if (callbacks) {
-            logger.info('Dispatching to', callbacks.size, 'callbacks');
             callbacks.forEach((cb) => cb(data.payload));
           }
         } catch (error) {
@@ -2073,6 +2112,44 @@ export class HttpApiClient implements ElectronAPI {
       conflictCount?: number;
       error?: string;
     }> => this.post('/api/features/check-conflicts', { projectPath, data }),
+    getOrphaned: (
+      projectPath: string
+    ): Promise<{
+      success: boolean;
+      orphanedFeatures?: Array<{ feature: Feature; missingBranch: string }>;
+      error?: string;
+    }> => this.post('/api/features/orphaned', { projectPath }),
+    resolveOrphaned: (
+      projectPath: string,
+      featureId: string,
+      action: 'delete' | 'create-worktree' | 'move-to-branch',
+      targetBranch?: string | null
+    ): Promise<{
+      success: boolean;
+      action?: string;
+      worktreePath?: string;
+      branchName?: string;
+      error?: string;
+    }> =>
+      this.post('/api/features/orphaned/resolve', { projectPath, featureId, action, targetBranch }),
+    bulkResolveOrphaned: (
+      projectPath: string,
+      featureIds: string[],
+      action: 'delete' | 'create-worktree' | 'move-to-branch',
+      targetBranch?: string | null
+    ): Promise<{
+      success: boolean;
+      resolvedCount?: number;
+      failedCount?: number;
+      results?: Array<{ featureId: string; success: boolean; action?: string; error?: string }>;
+      error?: string;
+    }> =>
+      this.post('/api/features/orphaned/bulk-resolve', {
+        projectPath,
+        featureIds,
+        action,
+        targetBranch,
+      }),
   };
 
   // Auto Mode API
@@ -2250,8 +2327,8 @@ export class HttpApiClient implements ElectronAPI {
       }),
     stageFiles: (worktreePath: string, files: string[], operation: 'stage' | 'unstage') =>
       this.post('/api/worktree/stage-files', { worktreePath, files, operation }),
-    pull: (worktreePath: string, remote?: string, stashIfNeeded?: boolean) =>
-      this.post('/api/worktree/pull', { worktreePath, remote, stashIfNeeded }),
+    pull: (worktreePath: string, remote?: string, stashIfNeeded?: boolean, remoteBranch?: string) =>
+      this.post('/api/worktree/pull', { worktreePath, remote, remoteBranch, stashIfNeeded }),
     checkoutBranch: (
       worktreePath: string,
       branchName: string,
@@ -2294,6 +2371,9 @@ export class HttpApiClient implements ElectronAPI {
     getDevServerLogs: (worktreePath: string): Promise<DevServerLogsResponse> =>
       this.get(`/api/worktree/dev-server-logs?worktreePath=${encodeURIComponent(worktreePath)}`),
     onDevServerLogEvent: (callback: (event: DevServerLogEvent) => void) => {
+      const unsub0 = this.subscribeToEvent('dev-server:starting', (payload) =>
+        callback({ type: 'dev-server:starting', payload: payload as DevServerStartingEvent })
+      );
       const unsub1 = this.subscribeToEvent('dev-server:started', (payload) =>
         callback({ type: 'dev-server:started', payload: payload as DevServerStartedEvent })
       );
@@ -2307,6 +2387,7 @@ export class HttpApiClient implements ElectronAPI {
         callback({ type: 'dev-server:url-detected', payload: payload as DevServerUrlDetectedEvent })
       );
       return () => {
+        unsub0();
         unsub1();
         unsub2();
         unsub3();
@@ -2363,8 +2444,8 @@ export class HttpApiClient implements ElectronAPI {
       this.post('/api/worktree/stash-drop', { worktreePath, stashIndex }),
     cherryPick: (worktreePath: string, commitHashes: string[], options?: { noCommit?: boolean }) =>
       this.post('/api/worktree/cherry-pick', { worktreePath, commitHashes, options }),
-    rebase: (worktreePath: string, ontoBranch: string) =>
-      this.post('/api/worktree/rebase', { worktreePath, ontoBranch }),
+    rebase: (worktreePath: string, ontoBranch: string, remote?: string) =>
+      this.post('/api/worktree/rebase', { worktreePath, ontoBranch, remote }),
     abortOperation: (worktreePath: string) =>
       this.post('/api/worktree/abort-operation', { worktreePath }),
     continueOperation: (worktreePath: string) =>
@@ -2481,7 +2562,8 @@ export class HttpApiClient implements ElectronAPI {
       issue: IssueValidationInput,
       model?: ModelId,
       thinkingLevel?: ThinkingLevel,
-      reasoningEffort?: ReasoningEffort
+      reasoningEffort?: ReasoningEffort,
+      providerId?: string
     ) =>
       this.post('/api/github/validate-issue', {
         projectPath,
@@ -2489,6 +2571,7 @@ export class HttpApiClient implements ElectronAPI {
         model,
         thinkingLevel,
         reasoningEffort,
+        providerId,
       }),
     getValidationStatus: (projectPath: string, issueNumber?: number) =>
       this.post('/api/github/validation-status', { projectPath, issueNumber }),
@@ -2679,6 +2762,21 @@ export class HttpApiClient implements ElectronAPI {
           url?: string;
           headers?: Record<string, string>;
           enabled?: boolean;
+        }>;
+        eventHooks?: Array<{
+          id: string;
+          trigger: string;
+          enabled: boolean;
+          action: Record<string, unknown>;
+          name?: string;
+        }>;
+        ntfyEndpoints?: Array<{
+          id: string;
+          name: string;
+          serverUrl: string;
+          topic: string;
+          authType: string;
+          enabled: boolean;
         }>;
       };
       error?: string;

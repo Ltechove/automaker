@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef, startTransition } from 'react';
 import { createLogger } from '@automaker/utils/logger';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import {
@@ -34,8 +34,10 @@ import type {
   BacklogPlanResult,
   FeatureStatusWithPipeline,
   FeatureTemplate,
+  ReasoningEffort,
 } from '@automaker/types';
 import { pathsEqual } from '@/lib/utils';
+import { initializeProject } from '@/lib/project-init';
 import { toast } from 'sonner';
 import {
   BoardBackgroundModal,
@@ -82,7 +84,7 @@ import type {
   StashApplyConflictInfo,
 } from './board-view/worktree-panel/types';
 import { BoardErrorBoundary } from './board-view/board-error-boundary';
-import { COLUMNS, getColumnsWithPipeline } from './board-view/constants';
+import { COLUMNS, getColumnsWithPipeline, isBacklogLikeStatus } from './board-view/constants';
 import {
   useBoardFeatures,
   useBoardDragDrop,
@@ -113,7 +115,14 @@ const EMPTY_WORKTREES: ReturnType<ReturnType<typeof useAppStore.getState>['getWo
 
 const logger = createLogger('Board');
 
-export function BoardView() {
+interface BoardViewProps {
+  /** Feature ID from URL parameter - if provided, opens output modal for this feature on load */
+  initialFeatureId?: string;
+  /** Project path from URL parameter - if provided, switches to this project before handling deep link */
+  initialProjectPath?: string;
+}
+
+export function BoardView({ initialFeatureId, initialProjectPath }: BoardViewProps) {
   const {
     currentProject,
     defaultSkipTests,
@@ -132,6 +141,8 @@ export function BoardView() {
     getPrimaryWorktreeBranch,
     setPipelineConfig,
     featureTemplates,
+    defaultSortNewestCardOnTop,
+    upsertAndSetCurrentProject,
   } = useAppStore(
     useShallow((state) => ({
       currentProject: state.currentProject,
@@ -151,6 +162,8 @@ export function BoardView() {
       getPrimaryWorktreeBranch: state.getPrimaryWorktreeBranch,
       setPipelineConfig: state.setPipelineConfig,
       featureTemplates: state.featureTemplates,
+      defaultSortNewestCardOnTop: state.defaultSortNewestCardOnTop,
+      upsertAndSetCurrentProject: state.upsertAndSetCurrentProject,
     }))
   );
   // Also get keyboard shortcuts for the add feature shortcut
@@ -296,6 +309,185 @@ export function BoardView() {
     featuresWithContext,
     setFeaturesWithContext,
   });
+
+  // Handle deep link project switching - if URL includes a projectPath that differs from
+  // the current project, switch to the target project first. The feature/worktree deep link
+  // effect below will fire naturally once the project switch triggers a features reload.
+  const handledProjectPathRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!initialProjectPath || handledProjectPathRef.current === initialProjectPath) {
+      return;
+    }
+
+    // Check if we're already on the correct project
+    if (currentProject?.path && pathsEqual(currentProject.path, initialProjectPath)) {
+      handledProjectPathRef.current = initialProjectPath;
+      return;
+    }
+
+    handledProjectPathRef.current = initialProjectPath;
+
+    const switchProject = async () => {
+      try {
+        const initResult = await initializeProject(initialProjectPath);
+        if (!initResult.success) {
+          logger.warn(
+            `Deep link: failed to initialize project "${initialProjectPath}":`,
+            initResult.error
+          );
+          toast.error('Failed to open project from link', {
+            description: initResult.error || 'Unknown error',
+          });
+          return;
+        }
+
+        // Derive project name from path basename
+        const projectName =
+          initialProjectPath.split(/[/\\]/).filter(Boolean).pop() || initialProjectPath;
+        logger.info(`Deep link: switching to project "${projectName}" at ${initialProjectPath}`);
+        upsertAndSetCurrentProject(initialProjectPath, projectName);
+      } catch (error) {
+        logger.error('Deep link: project switch failed:', error);
+        toast.error('Failed to switch project', {
+          description: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    };
+
+    switchProject();
+  }, [initialProjectPath, currentProject?.path, upsertAndSetCurrentProject]);
+
+  // Handle initial feature ID from URL - switch to the correct worktree and open output modal
+  // Uses a ref to track which featureId has been handled to prevent re-opening
+  // when the component re-renders but initialFeatureId hasn't changed.
+  // We read worktrees from the store reactively so this effect re-runs once worktrees load.
+  const handledFeatureIdRef = useRef<string | undefined>(undefined);
+
+  // Reset the handled ref whenever initialFeatureId changes (including to undefined),
+  // so navigating to the same featureId again after clearing works correctly.
+  useEffect(() => {
+    handledFeatureIdRef.current = undefined;
+  }, [initialFeatureId]);
+  const deepLinkWorktrees = useAppStore(
+    useCallback(
+      (s) =>
+        currentProject?.path
+          ? (s.worktreesByProject[currentProject.path] ?? EMPTY_WORKTREES)
+          : EMPTY_WORKTREES,
+      [currentProject?.path]
+    )
+  );
+
+  // Track how many render cycles we've waited for worktrees during a deep link.
+  // If the Zustand store never gets populated (e.g., WorktreePanel hasn't mounted,
+  // useWorktrees setting is off, or the worktree query failed), we stop waiting
+  // after a threshold and open the modal without switching worktree.
+  const deepLinkRetryCountRef = useRef(0);
+  // Reset retry count when the feature ID changes
+  useEffect(() => {
+    deepLinkRetryCountRef.current = 0;
+  }, [initialFeatureId]);
+
+  useEffect(() => {
+    if (
+      !initialFeatureId ||
+      handledFeatureIdRef.current === initialFeatureId ||
+      isLoading ||
+      !hookFeatures.length ||
+      !currentProject?.path
+    ) {
+      return;
+    }
+
+    const feature = hookFeatures.find((f) => f.id === initialFeatureId);
+    if (!feature) return;
+
+    // Resolve worktrees: prefer the Zustand store (reactive), but fall back to
+    // the React Query cache if the store hasn't been populated yet. The store is
+    // only synced by the WorktreePanel's useWorktrees hook, which may not have
+    // rendered yet during a deep link cold start. Reading the query cache directly
+    // avoids an indefinite wait that hangs the app on the loading screen.
+    let resolvedWorktrees = deepLinkWorktrees;
+    if (resolvedWorktrees.length === 0 && currentProject.path) {
+      const cachedData = queryClient.getQueryData(queryKeys.worktrees.all(currentProject.path)) as
+        | { worktrees?: WorktreeInfo[] }
+        | undefined;
+      if (cachedData?.worktrees && cachedData.worktrees.length > 0) {
+        resolvedWorktrees = cachedData.worktrees as typeof deepLinkWorktrees;
+      }
+    }
+
+    // If the feature has a branch and worktrees aren't available yet, wait briefly.
+    // After enough retries, proceed without switching worktree to avoid hanging.
+    const MAX_DEEP_LINK_RETRIES = 10;
+    if (feature.branchName && resolvedWorktrees.length === 0) {
+      deepLinkRetryCountRef.current++;
+      if (deepLinkRetryCountRef.current < MAX_DEEP_LINK_RETRIES) {
+        return; // Worktrees not loaded yet - effect will re-run when they load
+      }
+      // Exceeded retry limit — proceed without worktree switch to avoid hanging
+      logger.warn(
+        `Deep link: worktrees not available after ${MAX_DEEP_LINK_RETRIES} retries, ` +
+          `opening feature ${initialFeatureId} without switching worktree`
+      );
+    }
+
+    // Switch to the correct worktree based on the feature's branchName.
+    // IMPORTANT: Wrap in startTransition to batch the Zustand store update with
+    // any concurrent React state updates. Without this, the synchronous store
+    // mutation cascades through useAutoMode → refreshStatus → setAutoModeRunning,
+    // which can trigger React error #185 on mobile Safari/PWA crash loops.
+    if (feature.branchName && resolvedWorktrees.length > 0) {
+      const targetWorktree = resolvedWorktrees.find((w) => w.branch === feature.branchName);
+      if (targetWorktree) {
+        const currentWt = useAppStore.getState().getCurrentWorktree(currentProject.path);
+        const isAlreadySelected = targetWorktree.isMain
+          ? currentWt?.path === null
+          : currentWt?.path === targetWorktree.path;
+        if (!isAlreadySelected) {
+          logger.info(
+            `Deep link: switching to worktree "${targetWorktree.branch}" for feature ${initialFeatureId}`
+          );
+          startTransition(() => {
+            setCurrentWorktree(
+              currentProject.path,
+              targetWorktree.isMain ? null : targetWorktree.path,
+              targetWorktree.branch
+            );
+          });
+        }
+      }
+    } else if (!feature.branchName && resolvedWorktrees.length > 0) {
+      // Feature has no branch - should be on the main worktree
+      const currentWt = useAppStore.getState().getCurrentWorktree(currentProject.path);
+      if (currentWt?.path !== null && currentWt !== null) {
+        const mainWorktree = resolvedWorktrees.find((w) => w.isMain);
+        if (mainWorktree) {
+          logger.info(
+            `Deep link: switching to main worktree for unassigned feature ${initialFeatureId}`
+          );
+          startTransition(() => {
+            setCurrentWorktree(currentProject.path, null, mainWorktree.branch);
+          });
+        }
+      }
+    }
+
+    logger.info(`Opening output modal for feature from URL: ${initialFeatureId}`);
+    setOutputFeature(feature);
+    setShowOutputModal(true);
+    handledFeatureIdRef.current = initialFeatureId;
+  }, [
+    initialFeatureId,
+    isLoading,
+    hookFeatures,
+    currentProject?.path,
+    deepLinkWorktrees,
+    queryClient,
+    setCurrentWorktree,
+    setOutputFeature,
+    setShowOutputModal,
+  ]);
 
   // Load pipeline config when project changes
   useEffect(() => {
@@ -620,15 +812,27 @@ export function BoardView() {
   const selectedWorktreeBranch =
     currentWorktreeBranch || worktrees.find((w) => w.isMain)?.branch || 'main';
 
-  // Aggregate running auto tasks across all worktrees for this project
-  const autoModeByWorktree = useAppStore((state) => state.autoModeByWorktree);
-  const runningAutoTasksAllWorktrees = useMemo(() => {
-    if (!currentProject?.id) return [];
-    const prefix = `${currentProject.id}::`;
-    return Object.entries(autoModeByWorktree)
-      .filter(([key]) => key.startsWith(prefix))
-      .flatMap(([, state]) => state.runningTasks ?? []);
-  }, [autoModeByWorktree, currentProject?.id]);
+  // Aggregate running auto tasks across all worktrees for this project.
+  // IMPORTANT: Use a derived selector with shallow equality instead of subscribing
+  // to the raw autoModeByWorktree object. The raw subscription caused the entire
+  // BoardView to re-render on EVERY auto-mode state change (any worktree), which
+  // during worktree switches cascaded through DndContext/KanbanBoard and triggered
+  // React error #185 (maximum update depth exceeded), crashing the board view.
+  const runningAutoTasksAllWorktrees = useAppStore(
+    useShallow((state) => {
+      if (!currentProject?.id) return [] as string[];
+      const prefix = `${currentProject.id}::`;
+      const tasks: string[] = [];
+      for (const [key, worktreeState] of Object.entries(state.autoModeByWorktree)) {
+        if (key.startsWith(prefix) && worktreeState.runningTasks) {
+          for (const task of worktreeState.runningTasks) {
+            tasks.push(task);
+          }
+        }
+      }
+      return tasks;
+    })
+  );
 
   // Get in-progress features for keyboard shortcuts (needed before actions hook)
   // Must be after runningAutoTasks is defined
@@ -657,11 +861,15 @@ export function BoardView() {
 
   // Recovery handler for BoardErrorBoundary: reset worktree selection to main
   // so the board can re-render without the stale worktree state that caused the crash.
+  // Wrapped in startTransition to batch with concurrent React updates and avoid
+  // triggering another cascade during recovery.
   const handleBoardRecover = useCallback(() => {
     if (!currentProject) return;
     const mainWorktree = worktrees.find((w) => w.isMain);
     const mainBranch = mainWorktree?.branch || 'main';
-    setCurrentWorktree(currentProject.path, null, mainBranch);
+    startTransition(() => {
+      setCurrentWorktree(currentProject.path, null, mainBranch);
+    });
   }, [currentProject, worktrees, setCurrentWorktree]);
 
   // Helper function to add and select a worktree
@@ -736,6 +944,7 @@ export function BoardView() {
     onWorktreeCreated: () => setWorktreeRefreshKey((k) => k + 1),
     onWorktreeAutoSelect: addAndSelectWorktree,
     currentWorktreeBranch,
+    stopFeature: autoMode.stopFeature,
   });
 
   // Handler for bulk updating multiple features
@@ -977,23 +1186,27 @@ export function BoardView() {
 
   // Helper that creates a feature and immediately starts it (used by conflict handlers and the Make button)
   const handleAddAndStartFeature = useCallback(
-    async (featureData: Parameters<typeof handleAddFeature>[0]) => {
-      // Capture existing feature IDs before adding
-      const featuresBeforeIds = new Set(useAppStore.getState().features.map((f) => f.id));
+    async (featureData: Parameters<typeof handleAddFeature>[0]): Promise<string | null> => {
+      let createdFeatureId: string | null = null;
       try {
         // Create feature directly with in_progress status to avoid brief backlog flash
-        await handleAddFeature({ ...featureData, initialStatus: 'in_progress' });
+        const createdFeature = await handleAddFeature({
+          ...featureData,
+          initialStatus: 'in_progress',
+        });
+        createdFeatureId = createdFeature?.id ?? null;
       } catch (error) {
         logger.error('Failed to create feature:', error);
         toast.error('Failed to create feature', {
           description: error instanceof Error ? error.message : 'An error occurred',
         });
-        return;
+        return null;
       }
 
-      // Find the newly created feature by looking for an ID that wasn't in the original set
       const latestFeatures = useAppStore.getState().features;
-      const newFeature = latestFeatures.find((f) => !featuresBeforeIds.has(f.id));
+      const newFeature = createdFeatureId
+        ? latestFeatures.find((f) => f.id === createdFeatureId)
+        : undefined;
 
       if (newFeature) {
         try {
@@ -1010,6 +1223,8 @@ export function BoardView() {
           description: 'The feature was created but could not be started automatically.',
         });
       }
+
+      return createdFeatureId;
     },
     [handleAddFeature, handleStartImplementation]
   );
@@ -1018,7 +1233,12 @@ export function BoardView() {
   const handleQuickAdd = useCallback(
     async (
       description: string,
-      modelEntry: { model: string; thinkingLevel?: string; reasoningEffort?: string }
+      modelEntry: {
+        model: string;
+        thinkingLevel?: string;
+        reasoningEffort?: string;
+        providerId?: string;
+      }
     ) => {
       // Generate a title from the first line of the description
       const title = description.split('\n')[0].substring(0, 100);
@@ -1032,7 +1252,8 @@ export function BoardView() {
         skipTests: defaultSkipTests,
         model: resolveModelString(modelEntry.model) as ModelAlias,
         thinkingLevel: (modelEntry.thinkingLevel as ThinkingLevel) || 'none',
-        reasoningEffort: modelEntry.reasoningEffort,
+        reasoningEffort: modelEntry.reasoningEffort as ReasoningEffort,
+        providerId: modelEntry.providerId,
         branchName: addFeatureUseSelectedWorktreeBranch ? selectedWorktreeBranch : undefined,
         priority: 2,
         planningMode: useAppStore.getState().defaultPlanningMode ?? 'skip',
@@ -1053,7 +1274,12 @@ export function BoardView() {
   const handleQuickAddAndStart = useCallback(
     async (
       description: string,
-      modelEntry: { model: string; thinkingLevel?: string; reasoningEffort?: string }
+      modelEntry: {
+        model: string;
+        thinkingLevel?: string;
+        reasoningEffort?: string;
+        providerId?: string;
+      }
     ) => {
       // Generate a title from the first line of the description
       const title = description.split('\n')[0].substring(0, 100);
@@ -1067,7 +1293,8 @@ export function BoardView() {
         skipTests: defaultSkipTests,
         model: resolveModelString(modelEntry.model) as ModelAlias,
         thinkingLevel: (modelEntry.thinkingLevel as ThinkingLevel) || 'none',
-        reasoningEffort: modelEntry.reasoningEffort,
+        reasoningEffort: modelEntry.reasoningEffort as ReasoningEffort,
+        providerId: modelEntry.providerId,
         branchName: addFeatureUseSelectedWorktreeBranch ? selectedWorktreeBranch : undefined,
         priority: 2,
         planningMode: useAppStore.getState().defaultPlanningMode ?? 'skip',
@@ -1104,6 +1331,8 @@ export function BoardView() {
       title: prInfo.title,
       // Pass the worktree's branch so features are created on the correct worktree
       headRefName: worktree.branch,
+      // Pass the PR URL so features are created with prUrl set
+      url: prInfo.url,
     });
     setShowPRCommentDialog(true);
   }, []);
@@ -1132,11 +1361,22 @@ export function BoardView() {
         priority: 1,
         planningMode: 'skip' as const,
         requirePlanApproval: false,
+        dependencies: [],
       };
 
-      await handleAddAndStartFeature(featureData);
+      const createdFeatureId = await handleAddAndStartFeature(featureData);
+
+      // Set prUrl on the created feature if the PR has a URL
+      if (prInfo.url && createdFeatureId) {
+        updateFeature(createdFeatureId, { prUrl: prInfo.url });
+        try {
+          await persistFeatureUpdate(createdFeatureId, { prUrl: prInfo.url });
+        } catch (error) {
+          logger.error('Failed to persist PR URL on created feature:', error);
+        }
+      }
     },
-    [handleAddAndStartFeature, defaultSkipTests]
+    [handleAddAndStartFeature, defaultSkipTests, updateFeature, persistFeatureUpdate]
   );
 
   // Handler for resolving conflicts - opens dialog to select remote branch, then creates a feature
@@ -1380,6 +1620,7 @@ export function BoardView() {
     runningAutoTasks: runningAutoTasksAllWorktrees,
     persistFeatureUpdate,
     handleStartImplementation,
+    stopFeature: autoMode.stopFeature,
   });
 
   // Handle dependency link creation
@@ -1426,6 +1667,11 @@ export function BoardView() {
     ]
   );
 
+  // Use background hook for visual settings (background image, opacity, etc.)
+  const { backgroundSettings, backgroundImageStyle } = useBoardBackground({
+    currentProject,
+  });
+
   // Use column features hook
   const { getColumnFeatures, completedFeatures } = useBoardColumnFeatures({
     features: hookFeatures,
@@ -1435,6 +1681,7 @@ export function BoardView() {
     currentWorktreePath,
     currentWorktreeBranch,
     projectPath: currentProject?.path || null,
+    sortNewestCardOnTop: defaultSortNewestCardOnTop,
   });
 
   // Build columnFeaturesMap for ListView
@@ -1447,11 +1694,6 @@ export function BoardView() {
     }
     return map;
   }, [pipelineConfig, getColumnFeatures]);
-
-  // Use background hook
-  const { backgroundSettings, backgroundImageStyle } = useBoardBackground({
-    currentProject,
-  });
 
   // Find feature for pending plan approval
   const pendingApprovalFeature = useMemo(() => {
@@ -1764,12 +2006,16 @@ export function BoardView() {
                 selectedFeatureIds={selectedFeatureIds}
                 onToggleFeatureSelection={toggleFeatureSelection}
                 onRowClick={(feature) => {
-                  if (feature.status === 'backlog') {
+                  // Running features should always show logs, even if status is
+                  // stale (still 'backlog'/'ready'/'interrupted' during race window)
+                  const isRunning = runningAutoTasksAllWorktrees.includes(feature.id);
+                  if (isBacklogLikeStatus(feature.status) && !isRunning) {
                     setEditingFeature(feature);
                   } else {
                     handleViewOutput(feature);
                   }
                 }}
+                sortNewestCardOnTop={defaultSortNewestCardOnTop}
                 className="transition-opacity duration-200"
               />
             ) : (
@@ -1952,7 +2198,10 @@ export function BoardView() {
       {/* Agent Output Modal */}
       <AgentOutputModal
         open={showOutputModal}
-        onClose={() => setShowOutputModal(false)}
+        onClose={() => {
+          setShowOutputModal(false);
+          handledFeatureIdRef.current = undefined;
+        }}
         featureDescription={outputFeature?.description || ''}
         featureId={outputFeature?.id || ''}
         featureStatus={outputFeature?.status}

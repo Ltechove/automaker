@@ -261,7 +261,10 @@ morgan.token('status-colored', (_req, res) => {
 app.use(
   morgan(':method :url :status-colored', {
     // Skip when request logging is disabled or for health check endpoints
-    skip: (req) => !requestLoggingEnabled || req.url === '/api/health',
+    skip: (req) =>
+      !requestLoggingEnabled ||
+      req.url === '/api/health' ||
+      req.url === '/api/auto-mode/context-exists',
   })
 );
 // CORS configuration
@@ -349,7 +352,9 @@ const ideationService = new IdeationService(events, settingsService, featureLoad
 
 // Initialize DevServerService with event emitter for real-time log streaming
 const devServerService = getDevServerService();
-devServerService.setEventEmitter(events);
+devServerService.initialize(DATA_DIR, events).catch((err) => {
+  logger.error('Failed to initialize DevServerService:', err);
+});
 
 // Initialize Notification Service with event emitter for real-time updates
 const notificationService = getNotificationService();
@@ -434,21 +439,18 @@ eventHookService.initialize(events, settingsService, eventHistoryService, featur
           logger.info('[STARTUP] Feature state reconciliation complete - no stale states found');
         }
 
-        // Resume interrupted features in the background after reconciliation.
-        // This uses the saved execution state to identify features that were running
-        // before the restart (their statuses have been reset to ready/backlog by
-        // reconciliation above). Running in background so it doesn't block startup.
-        if (totalReconciled > 0) {
-          for (const project of globalSettings.projects) {
-            autoModeService.resumeInterruptedFeatures(project.path).catch((err) => {
-              logger.warn(
-                `[STARTUP] Failed to resume interrupted features for ${project.path}:`,
-                err
-              );
-            });
-          }
-          logger.info('[STARTUP] Initiated background resume of interrupted features');
+        // Resume interrupted features in the background for all projects.
+        // This handles features stuck in transient states (in_progress, pipeline_*)
+        // or explicitly marked as interrupted. Running in background so it doesn't block startup.
+        for (const project of globalSettings.projects) {
+          autoModeService.resumeInterruptedFeatures(project.path).catch((err) => {
+            logger.warn(
+              `[STARTUP] Failed to resume interrupted features for ${project.path}:`,
+              err
+            );
+          });
         }
+        logger.info('[STARTUP] Initiated background resume of interrupted features');
       }
     } catch (err) {
       logger.warn('[STARTUP] Failed to reconcile feature states:', err);
@@ -494,7 +496,7 @@ app.use(
 );
 app.use('/api/auto-mode', createAutoModeRoutes(autoModeService));
 app.use('/api/enhance-prompt', createEnhancePromptRoutes(settingsService));
-app.use('/api/worktree', createWorktreeRoutes(events, settingsService));
+app.use('/api/worktree', createWorktreeRoutes(events, settingsService, featureLoader));
 app.use('/api/git', createGitRoutes());
 app.use('/api/models', createModelsRoutes());
 app.use('/api/spec-regeneration', createSpecRegenerationRoutes(events, settingsService));
@@ -596,24 +598,23 @@ wss.on('connection', (ws: WebSocket) => {
 
   // Subscribe to all events and forward to this client
   const unsubscribe = events.subscribe((type, payload) => {
-    logger.info('Event received:', {
+    // Use debug level for high-frequency events to avoid log spam
+    // that causes progressive memory growth and server slowdown
+    const isHighFrequency =
+      type === 'dev-server:output' || type === 'test-runner:output' || type === 'feature:progress';
+    const log = isHighFrequency ? logger.debug.bind(logger) : logger.info.bind(logger);
+
+    log('Event received:', {
       type,
       hasPayload: !!payload,
-      payloadKeys: payload ? Object.keys(payload) : [],
       wsReadyState: ws.readyState,
-      wsOpen: ws.readyState === WebSocket.OPEN,
     });
 
     if (ws.readyState === WebSocket.OPEN) {
       const message = JSON.stringify({ type, payload });
-      logger.info('Sending event to client:', {
-        type,
-        messageLength: message.length,
-        sessionId: (payload as Record<string, unknown>)?.sessionId,
-      });
       ws.send(message);
     } else {
-      logger.info('WARNING: Cannot send event, WebSocket not open. ReadyState:', ws.readyState);
+      logger.warn('Cannot send event, WebSocket not open. ReadyState:', ws.readyState);
     }
   });
 

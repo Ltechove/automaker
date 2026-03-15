@@ -108,16 +108,14 @@ export class ExecutionService {
     return firstLine.length <= 60 ? firstLine : firstLine.substring(0, 57) + '...';
   }
 
-  buildFeaturePrompt(
-    feature: Feature,
-    taskExecutionPrompts: {
-      implementationInstructions: string;
-      playwrightVerificationInstructions: string;
-    }
-  ): string {
+  /**
+   * Build feature description section (without implementation instructions).
+   * Used when planning mode is active — the planning prompt provides its own instructions.
+   */
+  buildFeatureDescription(feature: Feature): string {
     const title = this.extractTitleFromDescription(feature.description);
 
-    let prompt = `## Feature Implementation Task
+    let prompt = `## Feature Task
 
 **Feature ID:** ${feature.id}
 **Title:** ${title}
@@ -146,6 +144,18 @@ ${feature.spec}
       prompt += `\n**Context Images Attached:**\n${feature.imagePaths.length} image(s) attached:\n${imagesList}\n`;
     }
 
+    return prompt;
+  }
+
+  buildFeaturePrompt(
+    feature: Feature,
+    taskExecutionPrompts: {
+      implementationInstructions: string;
+      playwrightVerificationInstructions: string;
+    }
+  ): string {
+    let prompt = this.buildFeatureDescription(feature);
+
     prompt += feature.skipTests
       ? `\n${taskExecutionPrompts.implementationInstructions}`
       : `\n${taskExecutionPrompts.implementationInstructions}\n\n${taskExecutionPrompts.playwrightVerificationInstructions}`;
@@ -169,6 +179,7 @@ ${feature.spec}
     const abortController = tempRunningFeature.abortController;
     if (isAutoMode) await this.saveExecutionStateFn(projectPath);
     let feature: Feature | null = null;
+    let pipelineCompleted = false;
 
     try {
       validateWorkingDirectory(projectPath);
@@ -214,7 +225,12 @@ ${feature.spec}
       const branchName = feature.branchName;
       if (!worktreePath && useWorktrees && branchName) {
         worktreePath = await this.worktreeResolver.findWorktreeForBranch(projectPath, branchName);
-        if (worktreePath) logger.info(`Using worktree for branch "${branchName}": ${worktreePath}`);
+        if (!worktreePath) {
+          throw new Error(
+            `Worktree enabled but no worktree found for feature branch "${branchName}".`
+          );
+        }
+        logger.info(`Using worktree for branch "${branchName}": ${worktreePath}`);
       }
       const workDir = worktreePath ? path.resolve(worktreePath) : path.resolve(projectPath);
       validateWorkingDirectory(workDir);
@@ -268,9 +284,15 @@ ${feature.spec}
       if (options?.continuationPrompt) {
         prompt = options.continuationPrompt;
       } else {
-        prompt =
-          (await this.getPlanningPromptPrefixFn(feature)) +
-          this.buildFeaturePrompt(feature, prompts.taskExecution);
+        const planningPrefix = await this.getPlanningPromptPrefixFn(feature);
+        if (planningPrefix) {
+          // Planning mode active: use planning instructions + feature description only.
+          // Do NOT include implementationInstructions — they conflict with the planning
+          // prompt's "DO NOT proceed with implementation until approval" directive.
+          prompt = planningPrefix + '\n\n' + this.buildFeatureDescription(feature);
+        } else {
+          prompt = this.buildFeaturePrompt(feature, prompts.taskExecution);
+        }
         if (feature.planningMode && feature.planningMode !== 'skip') {
           this.eventBus.emitAutoModeEvent('planning_started', {
             featureId: feature.id,
@@ -304,6 +326,7 @@ ${feature.spec}
           useClaudeCodeSystemPrompt,
           thinkingLevel: feature.thinkingLevel,
           reasoningEffort: feature.reasoningEffort,
+          providerId: feature.providerId,
           branchName: feature.branchName ?? null,
         }
       );
@@ -370,6 +393,7 @@ Please continue from where you left off and complete all remaining tasks. Use th
             useClaudeCodeSystemPrompt,
             thinkingLevel: feature.thinkingLevel,
             reasoningEffort: feature.reasoningEffort,
+            providerId: feature.providerId,
             branchName: feature.branchName ?? null,
           }
         );
@@ -408,6 +432,7 @@ Please continue from where you left off and complete all remaining tasks. Use th
           testAttempts: 0,
           maxTestAttempts: 5,
         });
+        pipelineCompleted = true;
         // Check if pipeline set a terminal status (e.g., merge_conflict) — don't overwrite it
         const refreshed = await this.loadFeatureFn(projectPath, featureId);
         if (refreshed?.status === 'merge_conflict') {
@@ -461,7 +486,10 @@ Please continue from where you left off and complete all remaining tasks. Use th
       const hasIncompleteTasks = totalTasks > 0 && completedTasks < totalTasks;
 
       try {
-        if (agentOutput) {
+        // Only save summary if feature doesn't already have one (e.g., accumulated from pipeline steps)
+        // This prevents overwriting accumulated summaries with just the last step's output
+        // The agent-executor already extracts and saves summaries during execution
+        if (agentOutput && !completedFeature?.summary) {
           const summary = extractSummary(agentOutput);
           if (summary) await this.saveFeatureSummaryFn(projectPath, featureId, summary);
         }
@@ -515,7 +543,30 @@ Please continue from where you left off and complete all remaining tasks. Use th
         }
       } else {
         logger.error(`Feature ${featureId} failed:`, error);
-        await this.updateFeatureStatusFn(projectPath, featureId, 'backlog');
+        // If pipeline steps completed successfully, don't send the feature back to backlog.
+        // The pipeline work is done — set to waiting_approval so the user can review.
+        const fallbackStatus = pipelineCompleted ? 'waiting_approval' : 'backlog';
+        if (pipelineCompleted) {
+          logger.info(
+            `[executeFeature] Feature ${featureId} failed after pipeline completed. ` +
+              `Setting status to waiting_approval instead of backlog to preserve pipeline work.`
+          );
+        }
+        // Don't overwrite terminal states like 'merge_conflict' that were set during pipeline execution
+        let currentStatus: string | undefined;
+        try {
+          const currentFeature = await this.loadFeatureFn(projectPath, featureId);
+          currentStatus = currentFeature?.status;
+        } catch (loadErr) {
+          // If loading fails, log it and proceed with the status update anyway
+          logger.warn(
+            `[executeFeature] Failed to reload feature ${featureId} for status check:`,
+            loadErr
+          );
+        }
+        if (currentStatus !== 'merge_conflict') {
+          await this.updateFeatureStatusFn(projectPath, featureId, fallbackStatus);
+        }
         this.eventBus.emitAutoModeEvent('auto_mode_error', {
           featureId,
           featureName: feature?.title,

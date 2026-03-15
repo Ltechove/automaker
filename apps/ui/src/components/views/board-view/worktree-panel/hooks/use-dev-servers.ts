@@ -4,13 +4,17 @@ import { getElectronAPI } from '@/lib/electron';
 import { normalizePath } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { DevServerInfo, WorktreeInfo } from '../types';
+import { useEventRecencyStore } from '@/hooks/use-event-recency';
 
 const logger = createLogger('DevServers');
 
 // Timeout (ms) for port detection before showing a warning to the user
 const PORT_DETECTION_TIMEOUT_MS = 30_000;
-// Interval (ms) for periodic state reconciliation with the backend
-const STATE_RECONCILE_INTERVAL_MS = 5_000;
+// Interval (ms) for periodic state reconciliation with the backend.
+// 30 seconds is sufficient since WebSocket events handle real-time updates;
+// reconciliation is only a fallback for missed events (PWA restart, WS gaps).
+// The previous 5-second interval added unnecessary HTTP pressure.
+const STATE_RECONCILE_INTERVAL_MS = 30_000;
 
 interface UseDevServersOptions {
   projectPath: string;
@@ -56,7 +60,8 @@ function showUrlDetectedToast(url: string, port: number): void {
 }
 
 export function useDevServers({ projectPath }: UseDevServersOptions) {
-  const [isStartingDevServer, setIsStartingDevServer] = useState(false);
+  const [isStartingAnyDevServer, setIsStartingAnyDevServer] = useState(false);
+  const [startingServers, setStartingServers] = useState<Set<string>>(new Set());
   const [runningDevServers, setRunningDevServers] = useState<Map<string, DevServerInfo>>(new Map());
 
   // Track which worktrees have had their url-detected toast shown to prevent re-triggering
@@ -321,13 +326,34 @@ export function useDevServers({ projectPath }: UseDevServersOptions) {
     return () => clearInterval(intervalId);
   }, [clearPortDetectionTimer, startPortDetectionTimer]);
 
+  // Record global events so smart polling knows WebSocket is healthy.
+  // Without this, dev-server events don't suppress polling intervals,
+  // causing all queries (features, worktrees, running-agents) to poll
+  // at their default rates even though the WebSocket is actively connected.
+  const recordGlobalEvent = useEventRecencyStore((state) => state.recordGlobalEvent);
+
   // Subscribe to all dev server lifecycle events for reactive state updates
   useEffect(() => {
     const api = getElectronAPI();
     if (!api?.worktree?.onDevServerLogEvent) return;
 
     const unsubscribe = api.worktree.onDevServerLogEvent((event) => {
-      if (event.type === 'dev-server:url-detected') {
+      // Record that WS is alive (but only for lifecycle events, not output -
+      // output fires too frequently and would trigger unnecessary store updates)
+      if (event.type !== 'dev-server:output') {
+        recordGlobalEvent();
+      }
+
+      if (event.type === 'dev-server:starting') {
+        const { worktreePath } = event.payload;
+        const key = normalizePath(worktreePath);
+        setStartingServers((prev) => {
+          const next = new Set(prev);
+          next.add(key);
+          return next;
+        });
+        logger.info(`Dev server starting for ${worktreePath} (reactive update)`);
+      } else if (event.type === 'dev-server:url-detected') {
         const { worktreePath, url, port } = event.payload;
         const key = normalizePath(worktreePath);
         // Clear the port detection timeout since URL was successfully detected
@@ -387,6 +413,15 @@ export function useDevServers({ projectPath }: UseDevServersOptions) {
         // Reactively add/update the server when it starts
         const { worktreePath, port, url } = event.payload;
         const key = normalizePath(worktreePath);
+
+        // Remove from starting set
+        setStartingServers((prev) => {
+          if (!prev.has(key)) return prev;
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+
         // Clear previous toast tracking for this key so a new detection triggers a fresh toast
         toastShownForRef.current.delete(key);
         setRunningDevServers((prev) => {
@@ -405,15 +440,16 @@ export function useDevServers({ projectPath }: UseDevServersOptions) {
     });
 
     return unsubscribe;
-  }, [clearPortDetectionTimer, startPortDetectionTimer]);
+  }, [clearPortDetectionTimer, startPortDetectionTimer, recordGlobalEvent]);
 
   // Cleanup all port detection timers on unmount
   useEffect(() => {
+    const timers = portDetectionTimers.current;
     return () => {
-      for (const timer of portDetectionTimers.current.values()) {
+      for (const timer of timers.values()) {
         clearTimeout(timer);
       }
-      portDetectionTimers.current.clear();
+      timers.clear();
     };
   }, []);
 
@@ -427,8 +463,8 @@ export function useDevServers({ projectPath }: UseDevServersOptions) {
 
   const handleStartDevServer = useCallback(
     async (worktree: WorktreeInfo) => {
-      if (isStartingDevServer) return;
-      setIsStartingDevServer(true);
+      if (isStartingAnyDevServer) return;
+      setIsStartingAnyDevServer(true);
 
       try {
         const api = getElectronAPI();
@@ -470,10 +506,10 @@ export function useDevServers({ projectPath }: UseDevServersOptions) {
           description: error instanceof Error ? error.message : undefined,
         });
       } finally {
-        setIsStartingDevServer(false);
+        setIsStartingAnyDevServer(false);
       }
     },
-    [isStartingDevServer, projectPath, startPortDetectionTimer]
+    [isStartingAnyDevServer, projectPath, startPortDetectionTimer]
   );
 
   const handleStopDevServer = useCallback(
@@ -543,6 +579,13 @@ export function useDevServers({ projectPath }: UseDevServersOptions) {
     [runningDevServers, getWorktreeKey]
   );
 
+  const isDevServerStarting = useCallback(
+    (worktree: WorktreeInfo) => {
+      return startingServers.has(getWorktreeKey(worktree));
+    },
+    [startingServers, getWorktreeKey]
+  );
+
   const getDevServerInfo = useCallback(
     (worktree: WorktreeInfo) => {
       return runningDevServers.get(getWorktreeKey(worktree));
@@ -551,10 +594,11 @@ export function useDevServers({ projectPath }: UseDevServersOptions) {
   );
 
   return {
-    isStartingDevServer,
+    isStartingAnyDevServer,
     runningDevServers,
     getWorktreeKey,
     isDevServerRunning,
+    isDevServerStarting,
     getDevServerInfo,
     handleStartDevServer,
     handleStopDevServer,

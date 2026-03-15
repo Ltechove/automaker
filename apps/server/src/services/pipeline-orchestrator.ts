@@ -115,6 +115,7 @@ export class PipelineOrchestrator {
         projectPath,
       });
       const model = resolveModelString(feature.model, DEFAULT_MODELS.claude);
+      const currentStatus = `pipeline_${step.id}`;
       await this.runAgentFn(
         workDir,
         featureId,
@@ -133,6 +134,8 @@ export class PipelineOrchestrator {
           useClaudeCodeSystemPrompt,
           thinkingLevel: feature.thinkingLevel,
           reasoningEffort: feature.reasoningEffort,
+          status: currentStatus,
+          providerId: feature.providerId,
         }
       );
       try {
@@ -165,7 +168,18 @@ export class PipelineOrchestrator {
     if (previousContext) prompt += `### Previous Work\n${previousContext}\n\n`;
     return (
       prompt +
-      `### Pipeline Step Instructions\n${step.instructions}\n\n### Task\nComplete the pipeline step instructions above.`
+      `### Pipeline Step Instructions\n${step.instructions}\n\n### Task\nComplete the pipeline step instructions above.\n\n` +
+      `**CRITICAL: After completing the instructions, you MUST output a summary using this EXACT format:**\n\n` +
+      `<summary>\n` +
+      `## Summary: ${step.name}\n\n` +
+      `### Changes Implemented\n` +
+      `- [List all changes made in this step]\n\n` +
+      `### Files Modified\n` +
+      `- [List all files modified in this step]\n\n` +
+      `### Outcome\n` +
+      `- [Describe the result of this step]\n` +
+      `</summary>\n\n` +
+      `The <summary> and </summary> tags MUST be on their own lines. This is REQUIRED.`
     );
   }
 
@@ -336,6 +350,7 @@ export class PipelineOrchestrator {
     });
     const abortController = runningEntry.abortController;
     runningEntry.branchName = feature.branchName ?? null;
+    let pipelineCompleted = false;
 
     try {
       validateWorkingDirectory(projectPath);
@@ -389,6 +404,7 @@ export class PipelineOrchestrator {
       };
 
       await this.executePipeline(context);
+      pipelineCompleted = true;
 
       // Re-fetch feature to check if executePipeline set a terminal status (e.g., merge_conflict)
       const reloadedFeature = await this.featureStateManager.loadFeature(projectPath, featureId);
@@ -425,8 +441,21 @@ export class PipelineOrchestrator {
           });
         }
       } else {
+        // If pipeline steps completed successfully, don't send the feature back to backlog.
+        // The pipeline work is done — set to waiting_approval so the user can review.
+        const fallbackStatus = pipelineCompleted ? 'waiting_approval' : 'backlog';
+        if (pipelineCompleted) {
+          logger.info(
+            `[resumeFromStep] Feature ${featureId} failed after pipeline completed. ` +
+              `Setting status to waiting_approval instead of backlog to preserve pipeline work.`
+          );
+        }
         logger.error(`Pipeline resume failed for ${featureId}:`, error);
-        await this.updateFeatureStatusFn(projectPath, featureId, 'backlog');
+        // Don't overwrite terminal states like 'merge_conflict' that were set during pipeline execution
+        const currentFeature = await this.featureStateManager.loadFeature(projectPath, featureId);
+        if (currentFeature?.status !== 'merge_conflict') {
+          await this.updateFeatureStatusFn(projectPath, featureId, fallbackStatus);
+        }
         this.eventBus.emitAutoModeEvent('auto_mode_error', {
           featureId,
           featureName: feature.title,
@@ -490,7 +519,10 @@ export class PipelineOrchestrator {
             requirePlanApproval: false,
             useClaudeCodeSystemPrompt: context.useClaudeCodeSystemPrompt,
             autoLoadClaudeMd: context.autoLoadClaudeMd,
+            thinkingLevel: context.feature.thinkingLevel,
             reasoningEffort: context.feature.reasoningEffort,
+            status: context.feature.status,
+            providerId: context.feature.providerId,
           }
         );
       }

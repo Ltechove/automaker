@@ -1,6 +1,5 @@
 // @ts-nocheck - feature update logic with partial updates and image/file handling
 import { useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import {
   Feature,
   FeatureImage,
@@ -14,16 +13,30 @@ import { FeatureImagePath as DescriptionImagePath } from '@/components/ui/descri
 import { getElectronAPI } from '@/lib/electron';
 import { isConnectionError, handleServerOffline, getHttpApiClient } from '@/lib/http-api-client';
 import { toast } from 'sonner';
-import { useAutoMode } from '@/hooks/use-auto-mode';
 import { useVerifyFeature, useResumeFeature } from '@/hooks/mutations';
 import { truncateDescription } from '@/lib/utils';
 import { getBlockingDependencies } from '@automaker/dependency-resolver';
 import { createLogger } from '@automaker/utils/logger';
-import { queryKeys } from '@/lib/query-keys';
+import {
+  markFeatureTransitioning,
+  unmarkFeatureTransitioning,
+} from '@/lib/feature-transition-state';
 
 const logger = createLogger('BoardActions');
 
 const MAX_DUPLICATES = 50;
+
+function normalizeFeatureBranchName(branchName?: string | null): string | undefined {
+  if (!branchName) return undefined;
+  let normalized = branchName.trim();
+  if (!normalized) return undefined;
+
+  normalized = normalized.replace(/^refs\/heads\//, '');
+  normalized = normalized.replace(/^refs\/remotes\/[^/]+\//, '');
+  normalized = normalized.replace(/^(origin|upstream)\//, '');
+
+  return normalized || undefined;
+}
 
 /**
  * Removes a running task from all worktrees for a given project.
@@ -74,6 +87,7 @@ interface UseBoardActionsProps {
   onWorktreeCreated?: () => void;
   onWorktreeAutoSelect?: (worktree: { path: string; branch: string }) => void;
   currentWorktreeBranch: string | null; // Branch name of the selected worktree for filtering
+  stopFeature: (featureId: string) => Promise<boolean>; // Passed from parent's useAutoMode to avoid duplicate subscription
 }
 
 export function useBoardActions({
@@ -102,9 +116,8 @@ export function useBoardActions({
   onWorktreeCreated,
   onWorktreeAutoSelect,
   currentWorktreeBranch,
+  stopFeature,
 }: UseBoardActionsProps) {
-  const queryClient = useQueryClient();
-
   // IMPORTANT: Use individual selectors instead of bare useAppStore() to prevent
   // subscribing to the entire store. Bare useAppStore() causes the host component
   // (BoardView) to re-render on EVERY store change, which cascades through effects
@@ -112,13 +125,11 @@ export function useBoardActions({
   const addFeature = useAppStore((s) => s.addFeature);
   const updateFeature = useAppStore((s) => s.updateFeature);
   const removeFeature = useAppStore((s) => s.removeFeature);
-  const moveFeature = useAppStore((s) => s.moveFeature);
   const worktreesEnabled = useAppStore((s) => s.useWorktrees);
   const enableDependencyBlocking = useAppStore((s) => s.enableDependencyBlocking);
   const skipVerificationInAutoMode = useAppStore((s) => s.skipVerificationInAutoMode);
   const isPrimaryWorktreeBranch = useAppStore((s) => s.isPrimaryWorktreeBranch);
   const getPrimaryWorktreeBranch = useAppStore((s) => s.getPrimaryWorktreeBranch);
-  const autoMode = useAutoMode();
 
   // React Query mutations for feature operations
   const verifyFeatureMutation = useVerifyFeature(currentProject?.path ?? '');
@@ -137,6 +148,8 @@ export function useBoardActions({
       skipTests: boolean;
       model: ModelAlias;
       thinkingLevel: ThinkingLevel;
+      reasoningEffort?: ReasoningEffort;
+      providerId?: string;
       branchName: string;
       priority: number;
       planningMode: PlanningMode;
@@ -182,7 +195,7 @@ export function useBoardActions({
       if (workMode === 'current') {
         // Work directly on current branch - use the current worktree's branch if not on main
         // This ensures features created on a non-main worktree are associated with that worktree
-        finalBranchName = currentWorktreeBranch || undefined;
+        finalBranchName = normalizeFeatureBranchName(currentWorktreeBranch);
       } else if (workMode === 'auto') {
         // Auto-generate a branch name based on feature title and timestamp
         // Create a slug from the title: lowercase, replace non-alphanumeric with hyphens
@@ -196,7 +209,7 @@ export function useBoardActions({
         finalBranchName = `feature/${titleSlug}-${randomSuffix}`;
       } else {
         // Custom mode - use provided branch name
-        finalBranchName = featureData.branchName || undefined;
+        finalBranchName = normalizeFeatureBranchName(featureData.branchName);
       }
 
       // Create worktree for 'auto' or 'custom' modes when we have a branch name
@@ -254,6 +267,7 @@ export function useBoardActions({
         status: initialStatus,
         branchName: finalBranchName,
         dependencies: featureData.dependencies || [],
+        createdAt: new Date().toISOString(),
         ...(initialStatus === 'in_progress' ? { startedAt: new Date().toISOString() } : {}),
       };
       const createdFeature = addFeature(newFeatureData);
@@ -388,11 +402,11 @@ export function useBoardActions({
       if (workMode === 'current') {
         // Work directly on current branch - use the current worktree's branch if not on main
         // This ensures features updated on a non-main worktree are associated with that worktree
-        finalBranchName = currentWorktreeBranch || undefined;
+        finalBranchName = normalizeFeatureBranchName(currentWorktreeBranch);
       } else if (workMode === 'auto') {
         // Preserve existing branch name if one exists (avoid orphaning worktrees on edit)
         if (updates.branchName?.trim()) {
-          finalBranchName = updates.branchName;
+          finalBranchName = normalizeFeatureBranchName(updates.branchName);
         } else {
           // Auto-generate a branch name based on feature title
           // Create a slug from the title: lowercase, replace non-alphanumeric with hyphens
@@ -406,7 +420,7 @@ export function useBoardActions({
           finalBranchName = `feature/${titleSlug}-${randomSuffix}`;
         }
       } else {
-        finalBranchName = updates.branchName || undefined;
+        finalBranchName = normalizeFeatureBranchName(updates.branchName);
       }
 
       // Create worktree for 'auto' or 'custom' modes when we have a branch name
@@ -523,7 +537,7 @@ export function useBoardActions({
 
       if (isRunning) {
         try {
-          await autoMode.stopFeature(featureId);
+          await stopFeature(featureId);
           // Remove from all worktrees
           if (currentProject) {
             removeRunningTaskFromAllWorktrees(currentProject.id, featureId);
@@ -558,7 +572,7 @@ export function useBoardActions({
       removeFeature(featureId);
       await persistFeatureDelete(featureId);
     },
-    [features, runningAutoTasks, autoMode, removeFeature, persistFeatureDelete, currentProject]
+    [features, runningAutoTasks, stopFeature, removeFeature, persistFeatureDelete, currentProject]
   );
 
   const handleRunFeature = useCallback(
@@ -692,8 +706,7 @@ export function useBoardActions({
       try {
         const result = await verifyFeatureMutation.mutateAsync(feature.id);
         if (result.passes) {
-          // Immediately move card to verified column (optimistic update)
-          moveFeature(feature.id, 'verified');
+          // persistFeatureUpdate handles the optimistic RQ cache update internally
           persistFeatureUpdate(feature.id, {
             status: 'verified',
             justFinishedAt: undefined,
@@ -710,7 +723,7 @@ export function useBoardActions({
         // Error toast is already shown by the mutation's onError handler
       }
     },
-    [currentProject, verifyFeatureMutation, moveFeature, persistFeatureUpdate]
+    [currentProject, verifyFeatureMutation, persistFeatureUpdate]
   );
 
   const handleResumeFeature = useCallback(
@@ -727,7 +740,6 @@ export function useBoardActions({
 
   const handleManualVerify = useCallback(
     (feature: Feature) => {
-      moveFeature(feature.id, 'verified');
       persistFeatureUpdate(feature.id, {
         status: 'verified',
         justFinishedAt: undefined,
@@ -736,7 +748,7 @@ export function useBoardActions({
         description: `Marked as verified: ${truncateDescription(feature.description)}`,
       });
     },
-    [moveFeature, persistFeatureUpdate]
+    [persistFeatureUpdate]
   );
 
   const handleMoveBackToInProgress = useCallback(
@@ -745,13 +757,12 @@ export function useBoardActions({
         status: 'in_progress' as const,
         startedAt: new Date().toISOString(),
       };
-      updateFeature(feature.id, updates);
       persistFeatureUpdate(feature.id, updates);
       toast.info('Feature moved back', {
         description: `Moved back to In Progress: ${truncateDescription(feature.description)}`,
       });
     },
-    [updateFeature, persistFeatureUpdate]
+    [persistFeatureUpdate]
   );
 
   const handleOpenFollowUp = useCallback(
@@ -870,7 +881,6 @@ export function useBoardActions({
         );
 
         if (result.success) {
-          moveFeature(feature.id, 'verified');
           persistFeatureUpdate(feature.id, { status: 'verified' });
           toast.success('Feature committed', {
             description: `Committed and verified: ${truncateDescription(feature.description)}`,
@@ -892,7 +902,7 @@ export function useBoardActions({
         await loadFeatures();
       }
     },
-    [currentProject, moveFeature, persistFeatureUpdate, loadFeatures, onWorktreeCreated]
+    [currentProject, persistFeatureUpdate, loadFeatures, onWorktreeCreated]
   );
 
   const handleMergeFeature = useCallback(
@@ -936,17 +946,12 @@ export function useBoardActions({
 
   const handleCompleteFeature = useCallback(
     (feature: Feature) => {
-      const updates = {
-        status: 'completed' as const,
-      };
-      updateFeature(feature.id, updates);
-      persistFeatureUpdate(feature.id, updates);
-
+      persistFeatureUpdate(feature.id, { status: 'completed' as const });
       toast.success('Feature completed', {
         description: `Archived: ${truncateDescription(feature.description)}`,
       });
     },
-    [updateFeature, persistFeatureUpdate]
+    [persistFeatureUpdate]
   );
 
   const handleUnarchiveFeature = useCallback(
@@ -963,11 +968,7 @@ export function useBoardActions({
           (projectPath ? isPrimaryWorktreeBranch(projectPath, currentWorktreeBranch) : true)
         : featureBranch === currentWorktreeBranch;
 
-      const updates: Partial<Feature> = {
-        status: 'verified' as const,
-      };
-      updateFeature(feature.id, updates);
-      persistFeatureUpdate(feature.id, updates);
+      persistFeatureUpdate(feature.id, { status: 'verified' as const });
 
       if (willBeVisibleOnCurrentView) {
         toast.success('Feature restored', {
@@ -979,13 +980,7 @@ export function useBoardActions({
         });
       }
     },
-    [
-      updateFeature,
-      persistFeatureUpdate,
-      currentWorktreeBranch,
-      projectPath,
-      isPrimaryWorktreeBranch,
-    ]
+    [persistFeatureUpdate, currentWorktreeBranch, projectPath, isPrimaryWorktreeBranch]
   );
 
   const handleViewOutput = useCallback(
@@ -1016,8 +1011,15 @@ export function useBoardActions({
 
   const handleForceStopFeature = useCallback(
     async (feature: Feature) => {
+      // Mark this feature as transitioning so WebSocket-driven query invalidation
+      // (useAutoModeQueryInvalidation) skips redundant cache invalidations while
+      // persistFeatureUpdate is handling the optimistic update. Without this guard,
+      // auto_mode_error / auto_mode_stopped WS events race with the optimistic
+      // update and cause cache flip-flops that cascade through useBoardColumnFeatures,
+      // triggering React error #185 on mobile.
+      markFeatureTransitioning(feature.id);
       try {
-        await autoMode.stopFeature(feature.id);
+        await stopFeature(feature.id);
 
         const targetStatus =
           feature.skipTests && feature.status === 'waiting_approval'
@@ -1025,7 +1027,7 @@ export function useBoardActions({
             : 'backlog';
 
         // Remove the running task from ALL worktrees for this project.
-        // autoMode.stopFeature only removes from its scoped worktree (branchName),
+        // stopFeature only removes from its scoped worktree (branchName),
         // but the feature may be tracked under a different worktree branch.
         // Without this, runningAutoTasksAllWorktrees still contains the feature
         // and the board column logic forces it into in_progress.
@@ -1033,25 +1035,11 @@ export function useBoardActions({
           removeRunningTaskFromAllWorktrees(currentProject.id, feature.id);
         }
 
-        // Optimistically update the React Query features cache so the board
-        // moves the card immediately. Without this, the card stays in
-        // "in_progress" until the next poll cycle (30s) because the async
-        // refetch races with the persistFeatureUpdate write.
-        if (currentProject) {
-          queryClient.setQueryData(
-            queryKeys.features.all(currentProject.path),
-            (oldFeatures: Feature[] | undefined) => {
-              if (!oldFeatures) return oldFeatures;
-              return oldFeatures.map((f) =>
-                f.id === feature.id ? { ...f, status: targetStatus } : f
-              );
-            }
-          );
-        }
-
         if (targetStatus !== feature.status) {
-          moveFeature(feature.id, targetStatus);
-          // Must await to ensure file is written before user can restart
+          // persistFeatureUpdate handles the optimistic RQ cache update, the
+          // Zustand store update (on server response), and the final cache
+          // invalidation internally — no need for separate queryClient.setQueryData
+          // or moveFeature calls which would cause redundant re-renders.
           await persistFeatureUpdate(feature.id, { status: targetStatus });
         }
 
@@ -1068,9 +1056,15 @@ export function useBoardActions({
         toast.error('Failed to stop agent', {
           description: error instanceof Error ? error.message : 'An error occurred',
         });
+      } finally {
+        // Delay unmarking so the refetch triggered by persistFeatureUpdate's
+        // invalidateQueries() has time to settle before WS-driven invalidations
+        // are allowed through again. Without this, a WS event arriving during
+        // the refetch window would trigger a conflicting invalidation.
+        setTimeout(() => unmarkFeatureTransitioning(feature.id), 500);
       }
     },
-    [autoMode, moveFeature, persistFeatureUpdate, currentProject, queryClient]
+    [stopFeature, persistFeatureUpdate, currentProject]
   );
 
   const handleStartNextFeatures = useCallback(async () => {
@@ -1182,7 +1176,7 @@ export function useBoardActions({
     if (runningVerified.length > 0) {
       await Promise.allSettled(
         runningVerified.map((feature) =>
-          autoMode.stopFeature(feature.id).catch((error) => {
+          stopFeature(feature.id).catch((error) => {
             logger.error('Error stopping feature before archive:', error);
           })
         )
@@ -1221,7 +1215,7 @@ export function useBoardActions({
       // Reload features to sync state with server on error
       loadFeatures();
     }
-  }, [features, runningAutoTasks, autoMode, updateFeature, currentProject, loadFeatures]);
+  }, [features, runningAutoTasks, stopFeature, updateFeature, currentProject, loadFeatures]);
 
   const handleDuplicateFeature = useCallback(
     async (feature: Feature, asChild: boolean = false) => {
